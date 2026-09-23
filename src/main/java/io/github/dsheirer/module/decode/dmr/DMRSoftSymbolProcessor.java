@@ -68,6 +68,9 @@ public class DMRSoftSymbolProcessor
     private static final int BUFFER_WORKSPACE_LENGTH_DIBITS = 25; //This can be adjusted for efficiency
     private static final int BUFFER_LENGTH_DIBITS = BUFFER_PROTECTED_REGION_DIBITS + BUFFER_WORKSPACE_LENGTH_DIBITS;
     private static final float EQUALIZER_LOOP_GAIN = 0.15f;
+    //Sync gap (500 ms) after which a mobile/direct sync is treated as a new transmission from a possibly different
+    //radio with a different carrier frequency offset, requiring full equalizer re-acquisition.
+    private static final int NEW_TRANSMISSION_GAP_SYMBOLS = 2400;
     private static final float MAXIMUM_EQUALIZER_BALANCE = (float)(Math.PI / 3.0);
     private static final float MAXIMUM_EQUALIZER_GAIN = 1.25f;
     private static final float MAXIMUM_POSITIVE_SAMPLE_PHASE = 3.5f;
@@ -87,6 +90,7 @@ public class DMRSoftSymbolProcessor
     private DMRMessageFramer mMessageFramer;
     private boolean mFineSync = false;
     private boolean mEqualizerInitialized = false;
+    private boolean mEqualizerReacquire = false;
     private double mNoiseStandardDeviationThreshold;
     private double mSecondarySyncOffset;
     private double mSamplesPerSymbol;
@@ -277,12 +281,14 @@ public class DMRSoftSymbolProcessor
 
                         if(primaryScore > SYNC_DETECTION_THRESHOLD && optimizeCoarse(mSyncDetector.getDetectedPattern(), 0))
                         {
+                            updateSyncModeMonitorCoarse(mSyncDetector.getDetectedPattern());
                             mMessageFramer.syncDetected(mSyncDetector.getDetectedPattern());
                             mFineSync = true;
                             mSymbolsSinceLastSync = 0;
                         }
                         else if(secondaryScore > SYNC_DETECTION_THRESHOLD && optimizeCoarse(mSyncDetectorSecondary.getDetectedPattern(), -mSecondarySyncOffset))
                         {
+                            updateSyncModeMonitorCoarse(mSyncDetectorSecondary.getDetectedPattern());
                             mMessageFramer.syncDetected(mSyncDetectorSecondary.getDetectedPattern());
                             mFineSync = true;
                             mSymbolsSinceLastSync = 0;
@@ -316,6 +322,21 @@ public class DMRSoftSymbolProcessor
         }
 
         return standardDeviation.getResult() > mNoiseStandardDeviationThreshold;
+    }
+
+    /**
+     * Updates the sync mode monitor with a mobile or direct mode sync detected during coarse sync acquisition.  Mobile
+     * and direct mode transmissions have an empty or inactive alternate timeslot, so fine sync is repeatedly lost and
+     * these syncs are mostly detected via coarse acquisition.  Base station syncs are not included here so that
+     * repeater and trunked channel mode detection is unchanged.
+     * @param pattern that was detected
+     */
+    private void updateSyncModeMonitorCoarse(DMRSyncPattern pattern)
+    {
+        if(pattern.isMobileSyncPattern())
+        {
+            mSyncModeMonitor.detected(pattern);
+        }
     }
 
     /**
@@ -409,7 +430,13 @@ public class DMRSoftSymbolProcessor
             mBufferPointer++;
         }
 
-        boolean resample = !mEqualizerInitialized || (Math.abs(adjustment) > 0.25);
+        //Mobile and direct mode transmissions can originate from different radios, each with a different carrier
+        //frequency offset.  After a sync gap, fully re-acquire the equalizer instead of slowly adapting from the
+        //previous radio's settings.  Base station channels are unaffected.
+        mEqualizerReacquire = mEqualizerInitialized && pattern.isMobileSyncPattern() &&
+                mSymbolsSinceLastSync > NEW_TRANSMISSION_GAP_SYMBOLS;
+
+        boolean resample = !mEqualizerInitialized || mEqualizerReacquire || (Math.abs(adjustment) > 0.25);
 
         updateEqualizer(pattern);
 //        visualizeSyncDetect(pattern, scoreCenter, true);
@@ -548,7 +575,16 @@ public class DMRSoftSymbolProcessor
         balanceAccumulator /= -24.0f;
         gainAccumulator /= (24.0f * Dibit.D01_PLUS_3.getIdealPhase());
 
-        if(mEqualizerInitialized)
+        float previousBalance = mEqualizerBalance;
+        float previousGain = mEqualizerGain;
+
+        if(mEqualizerReacquire)
+        {
+            //Buffered samples already have the previous gain applied, so remove it from the balance error measurement.
+            mEqualizerBalance += (balanceAccumulator / previousGain);
+            mEqualizerGain += gainAccumulator;
+        }
+        else if(mEqualizerInitialized)
         {
             //Limit equalizer adjustments at each sync after the initial equalizer setup.
             mEqualizerBalance += (balanceAccumulator * EQUALIZER_LOOP_GAIN);
@@ -564,13 +600,31 @@ public class DMRSoftSymbolProcessor
         mEqualizerBalance = Math.min(mEqualizerBalance, MAXIMUM_EQUALIZER_BALANCE);
         mEqualizerBalance = Math.max(mEqualizerBalance, -MAXIMUM_EQUALIZER_BALANCE);
 
-        mFeedbackDecoder.processPLLError(mEqualizerBalance);
+        //Only base station syncs drive channel/tuner frequency correction.  Mobile and direct mode radios each have
+        //their own carrier offset and would otherwise skew the tuner auto-PPM for all channels on the tuner.
+        if(!pattern.isMobileSyncPattern())
+        {
+            mFeedbackDecoder.processPLLError(mEqualizerBalance);
+        }
 
         //Constrain gain between 1.0f and 1.35f
         mEqualizerGain = Math.min(mEqualizerGain, MAXIMUM_EQUALIZER_GAIN);
         mEqualizerGain = Math.max(mEqualizerGain, 1.0f);
 
-        if(!mEqualizerInitialized)
+        if(mEqualizerReacquire)
+        {
+            //Buffered samples carry the previous equalizer settings.  Re-apply the samples with the updated settings
+            //so that the burst can be resampled using the new radio's carrier offset.
+            float balanceChange = mEqualizerBalance - previousBalance;
+
+            for(int x = 0; x < mBufferLoadPointer; x++)
+            {
+                mBuffer[x] = ((mBuffer[x] / previousGain) + balanceChange) * mEqualizerGain;
+            }
+
+            mEqualizerReacquire = false;
+        }
+        else if(!mEqualizerInitialized)
         {
             //Apply the initial gain settings to the samples in the buffer so that the symbols can be resampled.
             for(int x = 0; x < mBufferPointer; x++)

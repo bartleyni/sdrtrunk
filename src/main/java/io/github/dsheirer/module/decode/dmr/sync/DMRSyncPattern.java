@@ -199,6 +199,15 @@ public enum DMRSyncPattern
     }
 
     /**
+     * Indicates if this is the final (F) voice frame of a base station, mobile station, or direct mode voice superframe.
+     * @return true if a voice frame F pattern.
+     */
+    public boolean isVoiceFrameF()
+    {
+        return this == BS_VOICE_FRAME_F || this == MS_VOICE_FRAME_F || this == DIRECT_VOICE_FRAME_F;
+    }
+
+    /**
      * Determines the next voice sync pattern that follows the argument pattern.
      * @param pattern for the current burst
      * @return pattern for the next burst, or UNKNOWN

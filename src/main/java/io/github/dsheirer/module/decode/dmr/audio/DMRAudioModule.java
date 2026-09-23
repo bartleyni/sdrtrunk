@@ -41,6 +41,7 @@ import io.github.dsheirer.module.decode.dmr.message.data.terminator.Terminator;
 import io.github.dsheirer.module.decode.dmr.message.voice.VoiceEMBMessage;
 import io.github.dsheirer.module.decode.dmr.message.voice.VoiceMessage;
 import io.github.dsheirer.module.decode.dmr.message.voice.embedded.EmbeddedEncryptionParameters;
+import io.github.dsheirer.module.decode.dmr.sync.DMRSyncPattern;
 import io.github.dsheirer.preference.UserPreferences;
 import io.github.dsheirer.protocol.Protocol;
 import io.github.dsheirer.sample.Listener;
@@ -108,15 +109,9 @@ public class DMRAudioModule extends AmbeAudioModule implements IdentifierUpdateP
             //Attempt to set the audio encryption state from certain types of messages
             if(!mEncryptedCallStateEstablished)
             {
-                //DCDM doesn't provide FLCs or EMBs ... assume that the call is unencrypted.
-                if(message instanceof VoiceMessage vm && vm.getSyncPattern().isDirect())
-                {
-                    mEncryptedCallStateEstablished = true;
-                    mEncryptedCall = false;
-                }
                 //Both Motorola and Hytera signal their Basic Privacy (BP) scrambling in some of the Voice B-F frames
                 //in the EMB field.
-                else if(message instanceof VoiceEMBMessage voice)
+                if(message instanceof VoiceEMBMessage voice)
                 {
                     if(voice.hasEmbeddedParameters() &&
                        voice.getEmbeddedParameters().getShortBurst() instanceof EmbeddedEncryptionParameters)
@@ -128,6 +123,13 @@ public class DMRAudioModule extends AmbeAudioModule implements IdentifierUpdateP
                     {
                         mEncryptedCallStateEstablished = true;
                         mEncryptedCall = voice.getEMB().isEncrypted();
+                    }
+                    //Direct mode (DCDM) fallback: if no valid EMB, header or link control established the encryption
+                    //state by the end of the first voice superframe, assume that the call is unencrypted.
+                    else if(voice.getSyncPattern() == DMRSyncPattern.DIRECT_VOICE_FRAME_F)
+                    {
+                        mEncryptedCallStateEstablished = true;
+                        mEncryptedCall = false;
                     }
                 }
                 else if(message instanceof VoiceHeader vh && vh.getLCMessage() instanceof AbstractVoiceChannelUser vcu &&

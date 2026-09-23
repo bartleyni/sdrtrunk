@@ -23,6 +23,7 @@ import io.github.dsheirer.bits.CorrectedBinaryMessage;
 import io.github.dsheirer.identifier.Identifier;
 import io.github.dsheirer.module.decode.dmr.message.DMRMessage;
 import io.github.dsheirer.module.decode.dmr.message.data.header.UDTHeader;
+import io.github.dsheirer.module.decode.dmr.message.type.UnifiedDataTransportFormat;
 import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -35,6 +36,7 @@ public class UDTShortMessageService extends DMRMessage
     private static final Logger LOGGER = LoggerFactory.getLogger(UDTShortMessageService.class);
     private UDTHeader mHeader;
     private String mSMS;
+    private UDTNmeaLocation mNmeaLocation;
 
     /**
      * Constructs an instance
@@ -84,9 +86,11 @@ public class UDTShortMessageService extends DMRMessage
                 case BCD_4_BITS:
                     mSMS = parseBCD4Payload();
                     break;
+                case NMEA_GPS_LOCATION_CODED:
+                    mSMS = getNmeaLocation().toString();
+                    break;
                 case BINARY:
                 case MOBILE_SUBSCRIBER_OR_TALKGROUP_ADDRESS:
-                case NMEA_GPS_LOCATION_CODED:
                 case IP_ADDRESS:
                 case VENDOR_PROPRIETARY_8:
                 case VENDOR_PROPRIETARY_9:
@@ -106,6 +110,27 @@ public class UDTShortMessageService extends DMRMessage
         }
 
         return mSMS;
+    }
+
+    /**
+     * Indicates if this short data message carries an NMEA coded GPS location (e.g. a DMR APRS position report).
+     */
+    public boolean isNmeaLocation()
+    {
+        return mHeader.getFormat() == UnifiedDataTransportFormat.NMEA_GPS_LOCATION_CODED;
+    }
+
+    /**
+     * NMEA coded GPS location parsed from the payload.  Only meaningful when isNmeaLocation() is true.
+     */
+    public UDTNmeaLocation getNmeaLocation()
+    {
+        if(mNmeaLocation == null)
+        {
+            mNmeaLocation = new UDTNmeaLocation(getMessage());
+        }
+
+        return mNmeaLocation;
     }
 
     /**

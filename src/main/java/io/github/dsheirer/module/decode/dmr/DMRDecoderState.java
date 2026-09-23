@@ -84,6 +84,7 @@ import io.github.dsheirer.module.decode.dmr.message.data.lc.full.motorola.Capaci
 import io.github.dsheirer.module.decode.dmr.message.data.lc.full.motorola.MotorolaGroupVoiceChannelUser;
 import io.github.dsheirer.module.decode.dmr.message.data.lc.shorty.CapacityPlusRestChannel;
 import io.github.dsheirer.module.decode.dmr.message.data.packet.DMRPacketMessage;
+import io.github.dsheirer.module.decode.dmr.message.data.packet.UDTNmeaLocation;
 import io.github.dsheirer.module.decode.dmr.message.data.packet.UDTShortMessageService;
 import io.github.dsheirer.module.decode.dmr.message.data.terminator.Terminator;
 import io.github.dsheirer.module.decode.dmr.message.type.ServiceOptions;
@@ -102,6 +103,10 @@ import io.github.dsheirer.module.decode.ip.hytera.shortdata.HyteraShortDataPacke
 import io.github.dsheirer.module.decode.ip.hytera.sms.HyteraSmsPacket;
 import io.github.dsheirer.module.decode.ip.mototrbo.ars.ARSPacket;
 import io.github.dsheirer.module.decode.ip.mototrbo.lrrp.LRRPPacket;
+import io.github.dsheirer.module.decode.ip.mototrbo.lrrp.token.Heading;
+import io.github.dsheirer.module.decode.ip.mototrbo.lrrp.token.Point2d;
+import io.github.dsheirer.module.decode.ip.mototrbo.lrrp.token.Speed;
+import io.github.dsheirer.module.decode.ip.mototrbo.lrrp.token.Token;
 import io.github.dsheirer.module.decode.ip.mototrbo.tms.TMSPacket;
 import io.github.dsheirer.module.decode.ip.mototrbo.xcmp.XCMPPacket;
 import io.github.dsheirer.protocol.Protocol;
@@ -391,6 +396,33 @@ public class DMRDecoderState extends TimeslotDecoderState
     {
         broadcast(new DecoderStateEvent(this, Event.START, State.DATA, getTimeslot()));
 
+        //ETSI UDT NMEA coded GPS position (e.g. DMR APRS position reports) - plot on the map when valid
+        if(sms.isNmeaLocation() && sms.getNmeaLocation().isValid())
+        {
+            UDTNmeaLocation location = sms.getNmeaLocation();
+            MutableIdentifierCollection mic = new MutableIdentifierCollection(sms.getIdentifiers());
+            mic.update(location.getLocation());
+
+            PlottableDecodeEvent.PlottableDecodeEventBuilder builder = PlottableDecodeEvent
+                    .plottableBuilder(DecodeEventType.GPS, sms.getTimestamp())
+                    .channel(getCurrentChannel())
+                    .details(location.toString())
+                    .identifiers(mic)
+                    .protocol(Protocol.DMR)
+                    .location(location.getPosition())
+                    .speed(location.getSpeedKnots() * 1.852); //knots to KPH
+
+            if(location.getCourseOverGround() >= 0)
+            {
+                builder.heading(location.getCourseOverGround());
+            }
+
+            PlottableDecodeEvent gpsEvent = builder.build();
+            gpsEvent.setTimeslot(getTimeslot());
+            broadcast(gpsEvent);
+            return;
+        }
+
         DecodeEvent smsEvent = DMRDecodeEvent.builder(DecodeEventType.SMS, sms.getTimestamp())
                 .channel(getCurrentChannel())
                 .details("MESSAGE: " + sms.getSMS())
@@ -496,14 +528,61 @@ public class DMRDecoderState extends TimeslotDecoderState
         else if(packet.getPacket() instanceof LRRPPacket lrrp)
         {
             MutableIdentifierCollection mic = new MutableIdentifierCollection(packet.getIdentifiers());
+            Point2d point = null;
+            Speed speed = null;
+            Heading heading = null;
 
-            DecodeEvent shortDataEvent = DMRDecodeEvent.builder(DecodeEventType.LRRP, packet.getTimestamp())
-                    .channel(getCurrentChannel())
-                    .identifiers(mic)
-                    .timeslot(getTimeslot())
-                    .details(lrrp.toString())
-                    .build();
-            broadcast(shortDataEvent);
+            for(Token token: lrrp.getTokens())
+            {
+                if(point == null && token instanceof Point2d p)
+                {
+                    point = p;
+                }
+                else if(token instanceof Speed s)
+                {
+                    speed = s;
+                }
+                else if(token instanceof Heading h)
+                {
+                    heading = h;
+                }
+            }
+
+            //Plot LRRP position reports (e.g. DMR APRS from Motorola mode radios) on the map
+            if(point != null)
+            {
+                PlottableDecodeEvent.PlottableDecodeEventBuilder builder = PlottableDecodeEvent
+                        .plottableBuilder(DecodeEventType.LRRP, packet.getTimestamp())
+                        .channel(getCurrentChannel())
+                        .identifiers(mic)
+                        .details(lrrp.toString())
+                        .protocol(Protocol.DMR)
+                        .location(new GeoPosition(point.getLatitude(), point.getLongitude()));
+
+                if(speed != null)
+                {
+                    builder.speed(speed.getSpeed());
+                }
+
+                if(heading != null)
+                {
+                    builder.heading(heading.getHeading());
+                }
+
+                PlottableDecodeEvent lrrpEvent = builder.build();
+                lrrpEvent.setTimeslot(getTimeslot());
+                broadcast(lrrpEvent);
+            }
+            else
+            {
+                DecodeEvent shortDataEvent = DMRDecodeEvent.builder(DecodeEventType.LRRP, packet.getTimestamp())
+                        .channel(getCurrentChannel())
+                        .identifiers(mic)
+                        .timeslot(getTimeslot())
+                        .details(lrrp.toString())
+                        .build();
+                broadcast(shortDataEvent);
+            }
         }
         //Motorola TMS
         else if(packet.getPacket() instanceof TMSPacket tms)
@@ -580,7 +659,7 @@ public class DMRDecoderState extends TimeslotDecoderState
             broadcast(new DecoderStateEvent(this, Event.CONTINUATION, State.CALL, getTimeslot()));
         }
 
-        if(message.getSyncPattern() == DMRSyncPattern.BS_VOICE_FRAME_F && message instanceof VoiceEMBMessage voiceEmb)
+        if(message.getSyncPattern().isVoiceFrameF() && message instanceof VoiceEMBMessage voiceEmb)
         {
             if(voiceEmb.hasEmbeddedParameters())
             {
@@ -1450,7 +1529,16 @@ public class DMRDecoderState extends TimeslotDecoderState
         }
         else
         {
-            if(mCurrentCallEvent.getDetails() == null)
+            //Mobile and direct mode calls often start without a voice header (late entry) and are created as a
+            //generic CALL.  Upgrade the event type and details once the embedded link control identifies the call.
+            if(mCurrentCallEvent.getEventType() == DecodeEventType.CALL && type != DecodeEventType.CALL)
+            {
+                String previousDetails = mCurrentCallEvent.getDetails();
+                mCurrentCallEvent.setDecodeEventType(type);
+                mCurrentCallEvent.setDetails(previousDetails == null ? details :
+                        (details == null ? previousDetails : previousDetails + " " + details));
+            }
+            else if(mCurrentCallEvent.getDetails() == null)
             {
                 mCurrentCallEvent.setDetails(details);
             }
