@@ -24,6 +24,8 @@ import com.google.gson.JsonParser;
 import io.github.dsheirer.identifier.IdentifierCollection;
 import io.github.dsheirer.module.decode.dmr.identifier.DMRRadio;
 import io.github.dsheirer.module.decode.dmr.identifier.DMRTalkgroup;
+import io.github.dsheirer.module.decode.dmr.event.DMRDecodeEvent;
+import io.github.dsheirer.module.decode.event.DecodeEvent;
 import io.github.dsheirer.module.decode.event.DecodeEventType;
 import io.github.dsheirer.module.decode.event.PlottableDecodeEvent;
 import io.github.dsheirer.preference.mqtt.MqttPreference;
@@ -55,10 +57,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 public class GpsMqttPublisherTest
 {
     private static final String TOPIC = "test/dmr/gps";
+    private static final String ALARM_TOPIC = "test/dmr/alarm";
     private Server mBroker;
     private String mServerUri;
     private MqttClient mSubscriber;
     private final BlockingQueue<String> mReceived = new LinkedBlockingQueue<>();
+    private final BlockingQueue<String> mReceivedAlarms = new LinkedBlockingQueue<>();
 
     /**
      * Preference stub that doesn't touch the user's stored preferences.
@@ -80,6 +84,8 @@ public class GpsMqttPublisherTest
         @Override public String getPassword() {return "secret";}
         @Override public String getTopic() {return TOPIC;}
         @Override public Set<Integer> getDestinationIdFilter() {return mDestinationIds;}
+        @Override public boolean isAlarmEnabled() {return true;}
+        @Override public String getAlarmTopic() {return ALARM_TOPIC;}
     }
 
     @BeforeEach
@@ -103,6 +109,8 @@ public class GpsMqttPublisherTest
         mSubscriber = GpsMqttPublisher.connect(mServerUri, "sdrtrunk-subscriber-test", "", "");
         mSubscriber.subscribe(TOPIC, 1, (topic, message) ->
                 mReceived.add(new String(message.getPayload(), StandardCharsets.UTF_8)));
+        mSubscriber.subscribe(ALARM_TOPIC, 1, (topic, message) ->
+                mReceivedAlarms.add(new String(message.getPayload(), StandardCharsets.UTF_8)));
     }
 
     @AfterEach
@@ -225,6 +233,52 @@ public class GpsMqttPublisherTest
         //Default destination when no filter is set
         assertEquals(5057, JsonParser.parseString(GpsMqttPublisher.createTestMessage(Set.of()))
                 .getAsJsonObject().get("to").getAsInt());
+    }
+
+    @Test
+    void publishesEmergencyAlarmWithLastPosition() throws Exception
+    {
+        //Filter does not match the alarm destination - alarms must still be published
+        GpsMqttPublisher publisher = new GpsMqttPublisher(new TestPreference(Set.of(5057)));
+
+        try
+        {
+            publisher.receive(positionToRadio(3333333, 5057));
+            assertNotNull(mReceived.poll(10, TimeUnit.SECONDS), "No position message received");
+
+            DecodeEvent alarm = DMRDecodeEvent.builder(DecodeEventType.EMERGENCY, 1700000060000L)
+                    .identifiers(new IdentifierCollection(List.of(DMRRadio.createFrom(3333333),
+                            DMRTalkgroup.create(9))))
+                    .details("EMERGENCY CALL EMERGENCY")
+                    .build();
+            publisher.receive(alarm);
+
+            String payload = mReceivedAlarms.poll(10, TimeUnit.SECONDS);
+            assertNotNull(payload, "No MQTT alarm received");
+            JsonObject json = JsonParser.parseString(payload).getAsJsonObject();
+            assertEquals("EMERGENCY", json.get("type").getAsString());
+            assertEquals(3333333, json.get("from").getAsInt());
+            assertEquals(9, json.get("to").getAsInt());
+            JsonObject lastPosition = json.getAsJsonObject("last_position");
+            assertNotNull(lastPosition, "Alarm is missing the last known position");
+            assertEquals(51.5, lastPosition.get("latitude").getAsDouble(), 0.000001);
+            assertEquals(60, lastPosition.get("age_seconds").getAsLong());
+            assertNull(mReceived.poll(500, TimeUnit.MILLISECONDS), "Alarm was published to the position topic");
+        }
+        finally
+        {
+            publisher.stop();
+        }
+    }
+
+    @Test
+    void createsTestAlarm()
+    {
+        JsonObject json = JsonParser.parseString(GpsMqttPublisher.createTestAlarm()).getAsJsonObject();
+        assertTrue(json.get("test").getAsBoolean());
+        assertEquals("EMERGENCY", json.get("type").getAsString());
+        assertEquals("DMR", json.get("protocol").getAsString());
+        assertNotNull(json.getAsJsonObject("last_position"));
     }
 
     @Test

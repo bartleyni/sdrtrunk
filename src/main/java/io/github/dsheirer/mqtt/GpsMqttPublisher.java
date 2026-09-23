@@ -29,6 +29,8 @@ import io.github.dsheirer.identifier.IdentifierClass;
 import io.github.dsheirer.identifier.IdentifierCollection;
 import io.github.dsheirer.identifier.Role;
 import io.github.dsheirer.module.decode.dmr.identifier.DMRRadio;
+import io.github.dsheirer.module.decode.dmr.identifier.DMRTalkgroup;
+import io.github.dsheirer.module.decode.event.DecodeEvent;
 import io.github.dsheirer.module.decode.event.DecodeEventType;
 import io.github.dsheirer.module.decode.event.IDecodeEvent;
 import io.github.dsheirer.module.decode.event.PlottableDecodeEvent;
@@ -39,8 +41,10 @@ import io.github.dsheirer.sample.Listener;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import org.eclipse.paho.client.mqttv3.MqttClient;
@@ -53,7 +57,8 @@ import org.slf4j.LoggerFactory;
 
 /**
  * Publishes decoded DMR GPS position reports (DMR APRS via ETSI UDT NMEA or Motorola LRRP, and in-call GPS) to an
- * MQTT broker as JSON, optionally filtered by the destination (TO) radio or talkgroup ID.
+ * MQTT broker as JSON, optionally filtered by the destination (TO) radio or talkgroup ID.  DMR emergency alarms are
+ * published to a separate alarm topic, with the alarming radio's last known position when available.
  *
  * Decode events are received on decoder threads, so publishing is handed to a single background thread with a
  * bounded queue.  When the broker is slow or unreachable, excess position reports are discarded rather than
@@ -71,7 +76,9 @@ public class GpsMqttPublisher implements Listener<IDecodeEvent>
     private static final Gson GSON = new Gson();
     private static final int TEST_SOURCE_ID = 2345678;
     private static final int TEST_DESTINATION_ID = 5057;
+    private static final int MAX_TRACKED_RADIOS = 5000;
     private final ThreadPoolExecutor mExecutor;
+    private final Map<Integer,LastPosition> mLastPositions = new ConcurrentHashMap<>();
     private volatile Settings mSettings;
 
     //Accessed only from the executor thread
@@ -83,7 +90,12 @@ public class GpsMqttPublisher implements Listener<IDecodeEvent>
      * Snapshot of the MQTT preference settings
      */
     private record Settings(boolean enabled, String server, String clientId, String userName, String password,
-                            String topic, Set<Integer> destinationIds) {}
+                            String topic, Set<Integer> destinationIds, boolean alarmEnabled, String alarmTopic) {}
+
+    /**
+     * Most recent position reported by a radio, included with any emergency alarm from that radio.
+     */
+    private record LastPosition(double latitude, double longitude, long timestamp) {}
 
     /**
      * Constructs an instance
@@ -106,7 +118,7 @@ public class GpsMqttPublisher implements Listener<IDecodeEvent>
     {
         return new Settings(mPreference.isEnabled(), mPreference.getServer(), mPreference.getClientId(),
                 mPreference.getUserName(), mPreference.getPassword(), mPreference.getTopic(),
-                mPreference.getDestinationIdFilter());
+                mPreference.getDestinationIdFilter(), mPreference.isAlarmEnabled(), mPreference.getAlarmTopic());
     }
 
     /**
@@ -127,12 +139,71 @@ public class GpsMqttPublisher implements Listener<IDecodeEvent>
     {
         Settings settings = mSettings;
 
-        if(settings.enabled() && decodeEvent instanceof PlottableDecodeEvent event && isDmrPosition(event) &&
-                matchesDestination(event.getIdentifierCollection(), settings.destinationIds()))
+        if(!settings.enabled())
         {
-            String json = toJson(event, false);
-            mExecutor.execute(() -> publish(settings, json));
+            return;
         }
+
+        if(decodeEvent instanceof PlottableDecodeEvent event && isDmrPosition(event))
+        {
+            //Track the last position for every radio (regardless of filter) so it can accompany an emergency alarm
+            rememberPosition(event);
+
+            if(matchesDestination(event.getIdentifierCollection(), settings.destinationIds()))
+            {
+                String json = toJson(event, false);
+                mExecutor.execute(() -> publish(settings, settings.topic(), json));
+            }
+        }
+        //Emergency alarms are not subject to the destination ID filter so that no alarm is missed
+        else if(settings.alarmEnabled() && decodeEvent.getProtocol() == Protocol.DMR &&
+                decodeEvent.getEventType() == DecodeEventType.EMERGENCY)
+        {
+            String json = toAlarmJson(decodeEvent, getLastPosition(decodeEvent.getIdentifierCollection()), false);
+            mExecutor.execute(() -> publish(settings, settings.alarmTopic(), json));
+        }
+    }
+
+    /**
+     * Records the position event as the most recent position for the reporting (FROM) radio.
+     */
+    private void rememberPosition(PlottableDecodeEvent event)
+    {
+        Integer radio = getFromRadioId(event.getIdentifierCollection());
+
+        if(radio != null)
+        {
+            if(mLastPositions.size() >= MAX_TRACKED_RADIOS && !mLastPositions.containsKey(radio))
+            {
+                mLastPositions.clear();
+            }
+
+            mLastPositions.put(radio, new LastPosition(event.getLocation().getLatitude(),
+                    event.getLocation().getLongitude(), event.getTimeStart()));
+        }
+    }
+
+    /**
+     * Last known position for the FROM radio in the identifier collection, or null.
+     */
+    private LastPosition getLastPosition(IdentifierCollection identifiers)
+    {
+        Integer radio = getFromRadioId(identifiers);
+        return radio != null ? mLastPositions.get(radio) : null;
+    }
+
+    /**
+     * Integer value of the FROM identifier, or null.
+     */
+    private static Integer getFromRadioId(IdentifierCollection identifiers)
+    {
+        if(identifiers != null && identifiers.getFromIdentifier() != null &&
+                identifiers.getFromIdentifier().getValue() instanceof Integer radio)
+        {
+            return radio;
+        }
+
+        return null;
     }
 
     /**
@@ -192,6 +263,80 @@ public class GpsMqttPublisher implements Listener<IDecodeEvent>
         event.setTimeslot(1);
 
         return toJson(event, true);
+    }
+
+    /**
+     * Creates an example DMR emergency alarm JSON payload, marked as a test message, including an example last
+     * known position.
+     * @return JSON payload
+     */
+    public static String createTestAlarm()
+    {
+        long now = System.currentTimeMillis();
+        DecodeEvent event = DecodeEvent.builder(DecodeEventType.EMERGENCY, now)
+                .protocol(Protocol.DMR)
+                .identifiers(new IdentifierCollection(List.of(DMRRadio.createFrom(TEST_SOURCE_ID),
+                        DMRTalkgroup.create(9))))
+                .details("SDRTRUNK TEST MESSAGE - EXAMPLE DMR EMERGENCY ALARM")
+                .build();
+        event.setTimeslot(1);
+
+        return toAlarmJson(event, new LastPosition(51.50073, -0.12463, now - 60000), true);
+    }
+
+    /**
+     * Creates the JSON payload for an emergency alarm.
+     * @param event emergency event
+     * @param lastPosition of the alarming radio, or null when unknown
+     * @param test true to mark the payload as a test message
+     */
+    private static String toAlarmJson(IDecodeEvent event, LastPosition lastPosition, boolean test)
+    {
+        JsonObject json = new JsonObject();
+
+        if(test)
+        {
+            json.addProperty("test", true);
+        }
+
+        json.addProperty("timestamp", Instant.ofEpochMilli(event.getTimeStart()).toString());
+        json.addProperty("epoch_ms", event.getTimeStart());
+        json.addProperty("protocol", event.getProtocol().toString());
+        json.addProperty("type", event.getEventType().name());
+
+        IdentifierCollection identifiers = event.getIdentifierCollection();
+
+        if(identifiers != null)
+        {
+            addIdentifier(json, "from", identifiers.getFromIdentifier());
+            addIdentifier(json, "to", identifiers.getToIdentifier());
+        }
+
+        json.addProperty("timeslot", event.getTimeslot());
+
+        IChannelDescriptor channel = event.getChannelDescriptor();
+
+        if(channel != null && channel.getDownlinkFrequency() > 0)
+        {
+            json.addProperty("frequency", channel.getDownlinkFrequency());
+        }
+
+        if(event.getDetails() != null)
+        {
+            json.addProperty("details", event.getDetails());
+        }
+
+        if(lastPosition != null)
+        {
+            JsonObject position = new JsonObject();
+            position.addProperty("latitude", lastPosition.latitude());
+            position.addProperty("longitude", lastPosition.longitude());
+            position.addProperty("timestamp", Instant.ofEpochMilli(lastPosition.timestamp()).toString());
+            position.addProperty("age_seconds", Math.max(0, (event.getTimeStart() - lastPosition.timestamp()) / 1000));
+            json.add("last_position", position);
+        }
+
+        return GSON.toJson(json);
     }
 
     /**
@@ -260,7 +405,7 @@ public class GpsMqttPublisher implements Listener<IDecodeEvent>
     /**
      * Publishes the payload, connecting to the broker first when necessary.  Executes on the publisher thread.
      */
-    private void publish(Settings settings, String json)
+    private void publish(Settings settings, String topic, String json)
     {
         //Discard reports queued before the settings changed or publishing was disabled
         if(settings != mSettings || !settings.enabled())
@@ -297,11 +442,11 @@ public class GpsMqttPublisher implements Listener<IDecodeEvent>
 
         try
         {
-            mClient.publish(settings.topic(), json.getBytes(StandardCharsets.UTF_8), QOS, false);
+            mClient.publish(topic, json.getBytes(StandardCharsets.UTF_8), QOS, false);
         }
         catch(MqttException e)
         {
-            LOGGER.warn("Error publishing DMR GPS report to MQTT topic [" + settings.topic() + "] - " + e.getMessage());
+            LOGGER.warn("Error publishing DMR report to MQTT topic [" + topic + "] - " + e.getMessage());
             disconnect();
         }
     }

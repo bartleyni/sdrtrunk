@@ -84,6 +84,7 @@ import io.github.dsheirer.module.decode.dmr.message.data.lc.full.motorola.Capaci
 import io.github.dsheirer.module.decode.dmr.message.data.lc.full.motorola.MotorolaGroupVoiceChannelUser;
 import io.github.dsheirer.module.decode.dmr.message.data.lc.shorty.CapacityPlusRestChannel;
 import io.github.dsheirer.module.decode.dmr.message.data.packet.DMRPacketMessage;
+import io.github.dsheirer.module.decode.dmr.message.IServiceOptionsProvider;
 import io.github.dsheirer.module.decode.dmr.message.data.packet.UDTNmeaLocation;
 import io.github.dsheirer.module.decode.dmr.message.data.packet.UDTShortMessageService;
 import io.github.dsheirer.module.decode.dmr.message.data.terminator.Terminator;
@@ -133,6 +134,7 @@ public class DMRDecoderState extends TimeslotDecoderState
     private DMRNetworkConfigurationMonitor mNetworkConfigurationMonitor;
     private DMRTrafficChannelManager mTrafficChannelManager;
     private DecodeEvent mCurrentCallEvent;
+    private boolean mEmergencyReported = false;
     private boolean mIgnoreCRCChecksums;
     private DMRDecoderState mSisterDecoderState;
 
@@ -1200,6 +1202,29 @@ public class DMRDecoderState extends TimeslotDecoderState
      */
     private void processLinkControl(LCMessage message, boolean isTerminator)
     {
+        processLinkControlMessage(message, isTerminator);
+
+        //Report emergency calls (e.g. radio emergency/alarm button) once per call, after identifiers are updated.
+        if(!isTerminator && !mEmergencyReported && message instanceof IServiceOptionsProvider provider &&
+                provider.getServiceOptions().isEmergency())
+        {
+            mEmergencyReported = true;
+
+            DecodeEvent emergencyEvent = DMRDecodeEvent.builder(DecodeEventType.EMERGENCY, message.getTimestamp())
+                    .channel(getCurrentChannel())
+                    .details("EMERGENCY CALL " + provider.getServiceOptions())
+                    .identifiers(getIdentifierCollection().copyOf())
+                    .timeslot(getTimeslot())
+                    .build();
+            broadcast(emergencyEvent);
+        }
+    }
+
+    /**
+     * Processes link control messages
+     */
+    private void processLinkControlMessage(LCMessage message, boolean isTerminator)
+    {
         switch(message.getOpcode())
         {
             case FULL_ENCRYPTION_PARAMETERS:
@@ -1566,6 +1591,8 @@ public class DMRDecoderState extends TimeslotDecoderState
      */
     private void closeCurrentCallEvent(long timestamp)
     {
+        mEmergencyReported = false;
+
         if(mCurrentCallEvent != null)
         {
             mCurrentCallEvent.end(timestamp);

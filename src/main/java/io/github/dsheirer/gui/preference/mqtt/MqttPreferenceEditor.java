@@ -37,7 +37,7 @@ import java.nio.charset.StandardCharsets;
 import org.eclipse.paho.client.mqttv3.MqttClient;
 
 /**
- * Preference settings for publishing DMR GPS/APRS position reports to an MQTT broker.
+ * Preference settings for publishing DMR GPS/APRS position reports and emergency alarms to an MQTT broker.
  */
 public class MqttPreferenceEditor extends HBox
 {
@@ -53,6 +53,14 @@ public class MqttPreferenceEditor extends HBox
     private Button mSaveButton;
     private Button mTestButton;
     private Button mSendTestMessageButton;
+    private Button mSendTestAlarmButton;
+    private CheckBox mAlarmEnabledCheckBox;
+    private TextField mAlarmTopicTextField;
+
+    /**
+     * Broker test actions
+     */
+    private enum TestAction {CONNECT, POSITION, ALARM}
     private Label mStatusLabel;
 
     /**
@@ -76,7 +84,7 @@ public class MqttPreferenceEditor extends HBox
             mEditorPane.setVgap(10);
 
             int row = 0;
-            mEditorPane.add(new Label("MQTT - DMR GPS/APRS Position Reports"), 0, row++, 2, 1);
+            mEditorPane.add(new Label("MQTT - DMR GPS/APRS Position Reports & Emergency Alarms"), 0, row++, 2, 1);
             mEditorPane.add(getEnabledCheckBox(), 1, row++);
 
             row = addRow("Server:", getServerTextField(), row);
@@ -85,14 +93,19 @@ public class MqttPreferenceEditor extends HBox
             row = addRow("Password:", getPasswordField(), row);
             row = addRow("Topic:", getTopicTextField(), row);
             row = addRow("Sent To IDs:", getDestinationIdTextField(), row);
+            mEditorPane.add(getAlarmEnabledCheckBox(), 1, row++);
+            row = addRow("Alarm Topic:", getAlarmTopicTextField(), row);
 
-            HBox buttons = new HBox(10, getSaveButton(), getTestButton(), getSendTestMessageButton());
+            HBox buttons = new HBox(10, getSaveButton(), getTestButton(), getSendTestMessageButton(),
+                    getSendTestAlarmButton());
             mEditorPane.add(buttons, 1, row++);
             mEditorPane.add(getStatusLabel(), 1, row++);
 
             Label notes = new Label("Publishes DMR position reports (ETSI UDT NMEA, Motorola LRRP and in-call GPS) as " +
                     "JSON.\nSent To IDs: comma separated DMR radio or talkgroup IDs that the position report is sent " +
-                    "to (e.g. an APRS gateway ID).\nLeave blank to publish all position reports.\nServer examples: " +
+                    "to (e.g. an APRS gateway ID).\nLeave blank to publish all position reports.\nEmergency alarms " +
+                    "(DMR calls flagged as emergency) go to the alarm topic, are not filtered by Sent To IDs, and " +
+                    "include the radio's last known position when available.\nServer examples: " +
                     "tcp://192.168.1.10:1883 or ssl://broker.example.com:8883\nNote: the password is saved " +
                     "unencrypted in the sdrtrunk user preferences.");
             notes.setWrapText(true);
@@ -190,6 +203,28 @@ public class MqttPreferenceEditor extends HBox
         return mDestinationIdTextField;
     }
 
+    private CheckBox getAlarmEnabledCheckBox()
+    {
+        if(mAlarmEnabledCheckBox == null)
+        {
+            mAlarmEnabledCheckBox = new CheckBox("Publish Emergency Alarms");
+            mAlarmEnabledCheckBox.setSelected(mMqttPreference.isAlarmEnabled());
+        }
+
+        return mAlarmEnabledCheckBox;
+    }
+
+    private TextField getAlarmTopicTextField()
+    {
+        if(mAlarmTopicTextField == null)
+        {
+            mAlarmTopicTextField = new TextField(mMqttPreference.getAlarmTopic());
+            mAlarmTopicTextField.setPromptText(MqttPreference.DEFAULT_ALARM_TOPIC);
+        }
+
+        return mAlarmTopicTextField;
+    }
+
     private Label getStatusLabel()
     {
         if(mStatusLabel == null)
@@ -234,6 +269,17 @@ public class MqttPreferenceEditor extends HBox
         return mSendTestMessageButton;
     }
 
+    private Button getSendTestAlarmButton()
+    {
+        if(mSendTestAlarmButton == null)
+        {
+            mSendTestAlarmButton = new Button("Send Test Alarm");
+            mSendTestAlarmButton.setOnAction(event -> runBrokerTest(TestAction.ALARM));
+        }
+
+        return mSendTestAlarmButton;
+    }
+
     /**
      * Validates the entered values.
      * @return error message or null when valid.
@@ -247,11 +293,11 @@ public class MqttPreferenceEditor extends HBox
             return "Server must start with tcp://, ssl://, ws:// or wss://";
         }
 
-        String topic = getTopicTextField().getText();
+        String topic = getTopicTextField().getText() + getAlarmTopicTextField().getText();
 
         if(topic.contains("+") || topic.contains("#"))
         {
-            return "Topic cannot contain the MQTT wildcard characters + or #";
+            return "Topics cannot contain the MQTT wildcard characters + or #";
         }
 
         String ids = getDestinationIdTextField().getText().trim();
@@ -276,12 +322,14 @@ public class MqttPreferenceEditor extends HBox
 
         mMqttPreference.update(getEnabledCheckBox().isSelected(), getServerTextField().getText(),
                 getClientIdTextField().getText(), getUserNameTextField().getText(), getPasswordField().getText(),
-                getTopicTextField().getText(), getDestinationIdTextField().getText());
+                getTopicTextField().getText(), getDestinationIdTextField().getText(),
+                getAlarmEnabledCheckBox().isSelected(), getAlarmTopicTextField().getText());
 
         //Refresh the fields to show any defaults that were applied
         getServerTextField().setText(mMqttPreference.getServer());
         getClientIdTextField().setText(mMqttPreference.getClientId());
         getTopicTextField().setText(mMqttPreference.getTopic());
+        getAlarmTopicTextField().setText(mMqttPreference.getAlarmTopic());
         getStatusLabel().setText("Saved" + (mMqttPreference.isEnabled() ? " - publishing enabled" : " - publishing disabled"));
     }
 
@@ -291,7 +339,7 @@ public class MqttPreferenceEditor extends HBox
      */
     private void testConnection()
     {
-        runBrokerTest(false);
+        runBrokerTest(TestAction.CONNECT);
     }
 
     /**
@@ -300,16 +348,18 @@ public class MqttPreferenceEditor extends HBox
      */
     private void sendTestMessage()
     {
-        runBrokerTest(true);
+        runBrokerTest(TestAction.POSITION);
     }
 
     /**
      * Connects to the broker using the entered (not necessarily saved) settings on a background thread, optionally
-     * publishes a test message, and reports the outcome in the status label.
-     * @param publishTestMessage true to publish an example position report after connecting
+     * publishes a test position report or test alarm, and reports the outcome in the status label.
+     * @param action to perform after connecting
      */
-    private void runBrokerTest(boolean publishTestMessage)
+    private void runBrokerTest(TestAction action)
     {
+        boolean publishTestMessage = action != TestAction.CONNECT;
+
         String error = validate();
 
         if(error != null)
@@ -324,13 +374,26 @@ public class MqttPreferenceEditor extends HBox
                 getClientIdTextField().getText().trim()) + "-test";
         String userName = getUserNameTextField().getText();
         String password = getPasswordField().getText();
-        String topic = getTopicTextField().getText().isBlank() ? MqttPreference.DEFAULT_TOPIC :
-                getTopicTextField().getText().trim();
-        String payload = GpsMqttPublisher.createTestMessage(
-                MqttPreference.parseIds(getDestinationIdTextField().getText()));
+        String topic;
+        String payload;
+
+        if(action == TestAction.ALARM)
+        {
+            topic = getAlarmTopicTextField().getText().isBlank() ? MqttPreference.DEFAULT_ALARM_TOPIC :
+                    getAlarmTopicTextField().getText().trim();
+            payload = GpsMqttPublisher.createTestAlarm();
+        }
+        else
+        {
+            topic = getTopicTextField().getText().isBlank() ? MqttPreference.DEFAULT_TOPIC :
+                    getTopicTextField().getText().trim();
+            payload = GpsMqttPublisher.createTestMessage(
+                    MqttPreference.parseIds(getDestinationIdTextField().getText()));
+        }
 
         getTestButton().setDisable(true);
         getSendTestMessageButton().setDisable(true);
+        getSendTestAlarmButton().setDisable(true);
         getStatusLabel().setText((publishTestMessage ? "Sending test message to " : "Testing connection to ") +
                 server + " ...");
 
@@ -346,7 +409,8 @@ public class MqttPreferenceEditor extends HBox
                     if(publishTestMessage)
                     {
                         client.publish(topic, payload.getBytes(StandardCharsets.UTF_8), 1, false);
-                        result = "Test message sent to topic [" + topic + "]";
+                        result = (action == TestAction.ALARM ? "Test alarm" : "Test message") +
+                                " sent to topic [" + topic + "]";
                     }
                     else
                     {
@@ -368,6 +432,7 @@ public class MqttPreferenceEditor extends HBox
                 getStatusLabel().setText(status);
                 getTestButton().setDisable(false);
                 getSendTestMessageButton().setDisable(false);
+                getSendTestAlarmButton().setDisable(false);
             });
         }, "sdrtrunk mqtt connection test");
         thread.setDaemon(true);
