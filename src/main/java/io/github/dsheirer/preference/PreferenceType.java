@@ -31,6 +31,7 @@ public enum PreferenceType
     DUPLICATE_CALL_DETECTION,
     JMBE_LIBRARY,
     MP3,
+    MQTT,
     MULTI_FREQUENCY,
     PLAYLIST,
     PLAYBACK,

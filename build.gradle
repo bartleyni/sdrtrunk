@@ -80,6 +80,7 @@ dependencies {
     testRuntimeOnly("org.junit.jupiter:junit-jupiter-engine:6.0.1")
     testRuntimeOnly("org.junit.vintage:junit-vintage-engine:6.0.1")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+    testImplementation 'io.moquette:moquette-broker:0.17' //Embedded MQTT broker for publisher tests
 
     //Jitpack imports
     implementation 'com.github.dnault:libresample4j:master'
@@ -116,6 +117,7 @@ dependencies {
     implementation 'org.apache.mina:mina-core:2.2.9'
     implementation 'org.apache.mina:mina-http:2.2.9'
     implementation 'org.controlsfx:controlsfx:11.2.3'
+    implementation 'org.eclipse.paho:org.eclipse.paho.client.mqttv3:1.2.5'
     implementation 'org.rauschig:jarchivelib:1.2.0'
     implementation 'org.slf4j:slf4j-api:2.0.17'
     implementation 'org.usb4java:libusb4java:1.3.0'

@@ -42,6 +42,7 @@ import io.github.dsheirer.gui.viewer.ViewRecordingViewerRequest;
 import io.github.dsheirer.icon.IconModel;
 import io.github.dsheirer.log.ApplicationLog;
 import io.github.dsheirer.map.MapService;
+import io.github.dsheirer.mqtt.GpsMqttPublisher;
 import io.github.dsheirer.module.log.EventLogManager;
 import io.github.dsheirer.monitor.DiagnosticMonitor;
 import io.github.dsheirer.monitor.ResourceMonitor;
@@ -121,6 +122,7 @@ public class SDRTrunk implements Listener<TunerEvent>
     private boolean mResourceStatusVisible;
     private boolean mNowPlayingDetailsVisible;
     private AudioRecordingManager mAudioRecordingManager;
+    private GpsMqttPublisher mGpsMqttPublisher;
     private AudioStreamingManager mAudioStreamingManager;
     private BroadcastStatusPanel mBroadcastStatusPanel;
     private ControllerPanel mControllerPanel;
@@ -218,6 +220,9 @@ public class SDRTrunk implements Listener<TunerEvent>
 
         MapService mapService = new MapService(aliasModel, mIconModel);
         mPlaylistManager.getChannelProcessingManager().addDecodeEventListener(mapService);
+
+        mGpsMqttPublisher = new GpsMqttPublisher(mUserPreferences.getMqttPreference());
+        mPlaylistManager.getChannelProcessingManager().addDecodeEventListener(mGpsMqttPublisher);
 
         mNowPlayingDetailsVisible = mPreferences.getBoolean(PREFERENCE_NOW_PLAYING_DETAILS_VISIBLE, true);
 
@@ -634,6 +639,7 @@ public class SDRTrunk implements Listener<TunerEvent>
         mLog.info("Stopping channels ...");
         mPlaylistManager.getChannelProcessingManager().shutdown();
         mAudioRecordingManager.stop();
+        mGpsMqttPublisher.stop();
         mResourceMonitor.stop();
 
         mLog.info("Stopping spectral display ...");

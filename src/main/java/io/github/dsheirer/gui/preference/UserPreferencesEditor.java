@@ -200,6 +200,11 @@ public class UserPreferencesEditor extends BorderPane
             treeRoot.getChildren().add(storageItem);
             storageItem.setExpanded(true);
 
+            TreeItem<String> networkItem = new TreeItem<>("Network");
+            networkItem.getChildren().add(new TreeItem(PreferenceEditorType.MQTT));
+            treeRoot.getChildren().add(networkItem);
+            networkItem.setExpanded(true);
+
             TreeItem<String> sourceItem = new TreeItem<>("Source");
             sourceItem.getChildren().add(new TreeItem(PreferenceEditorType.SOURCE_TUNERS));
             treeRoot.getChildren().add(sourceItem);
