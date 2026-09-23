@@ -21,7 +21,11 @@ package io.github.dsheirer.mqtt;
 
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import io.github.dsheirer.alias.Alias;
+import io.github.dsheirer.alias.AliasModel;
+import io.github.dsheirer.alias.id.radio.Radio;
 import io.github.dsheirer.identifier.IdentifierCollection;
+import io.github.dsheirer.identifier.configuration.AliasListConfigurationIdentifier;
 import io.github.dsheirer.module.decode.dmr.identifier.DMRRadio;
 import io.github.dsheirer.module.decode.dmr.identifier.DMRTalkgroup;
 import io.github.dsheirer.module.decode.dmr.event.DMRDecodeEvent;
@@ -279,6 +283,38 @@ public class GpsMqttPublisherTest
         assertEquals("EMERGENCY", json.get("type").getAsString());
         assertEquals("DMR", json.get("protocol").getAsString());
         assertNotNull(json.getAsJsonObject("last_position"));
+    }
+
+    @Test
+    void includesAliases() throws Exception
+    {
+        AliasModel aliasModel = new AliasModel();
+        Alias radioAlias = new Alias("Nick HD2");
+        radioAlias.setAliasListName("Simplex");
+        radioAlias.addAliasID(new Radio(Protocol.DMR, 4444444));
+        aliasModel.addAlias(radioAlias);
+        Alias gatewayAlias = new Alias("APRS Gateway");
+        gatewayAlias.setAliasListName("Simplex");
+        gatewayAlias.addAliasID(new Radio(Protocol.DMR, 234999));
+        aliasModel.addAlias(gatewayAlias);
+
+        GpsMqttPublisher publisher = new GpsMqttPublisher(new TestPreference(Set.of()), aliasModel);
+
+        try
+        {
+            publisher.receive(position(4444444, new IdentifierCollection(List.of(DMRRadio.createFrom(4444444),
+                    DMRRadio.createTo(234999), AliasListConfigurationIdentifier.create("Simplex")))));
+
+            String payload = mReceived.poll(10, TimeUnit.SECONDS);
+            assertNotNull(payload, "No MQTT message received");
+            JsonObject json = JsonParser.parseString(payload).getAsJsonObject();
+            assertEquals("Nick HD2", json.get("from_alias").getAsString());
+            assertEquals("APRS Gateway", json.get("to_alias").getAsString());
+        }
+        finally
+        {
+            publisher.stop();
+        }
     }
 
     @Test

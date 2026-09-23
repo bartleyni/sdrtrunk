@@ -58,6 +58,7 @@ public class DMRMessageFramer implements Listener<Dibit>
     private int mDibitSinceTimestampCounter = 0;
     private long mReferenceTimestamp = 0;
     private boolean mRunning = false;
+    private boolean mSimplexMode = false;
     private final DMRMessageFactory mMessageFactory;
 
     /**
@@ -113,6 +114,17 @@ public class DMRMessageFramer implements Listener<Dibit>
     }
 
     /**
+     * Sets simplex (direct mode / talkaround) channel mode.  Some radios transmit base station sync patterns in simplex
+     * without a valid CACH.  In simplex mode, bursts that would otherwise have no timeslot assignment (timeslot 0) are
+     * assigned to timeslot 1 so that they are processed instead of ignored.
+     * @param enabled true for simplex channels
+     */
+    public void setSimplexMode(boolean enabled)
+    {
+        mSimplexMode = enabled;
+    }
+
+    /**
      * Indicates if the framer is assembling a burst and the active timeslot is assembling a voice superframe.
      */
     public boolean isVoiceSuperFrame()
@@ -165,6 +177,11 @@ public class DMRMessageFramer implements Listener<Dibit>
             {
                 mBufferBPattern = DMRSyncPattern.DIRECT_EMPTY_TIMESLOT;
             }
+        }
+        else if(mSimplexMode && mBufferATimeslot == 0)
+        {
+            mBufferATimeslot = 1;
+            mBufferBTimeslot = 2;
         }
 
         dispatch(mMessageFactory.create(mBufferAPattern, message, cach, getTimestamp(), mBufferATimeslot));
@@ -234,6 +251,11 @@ public class DMRMessageFramer implements Listener<Dibit>
             {
                 mBufferAPattern = DMRSyncPattern.DIRECT_EMPTY_TIMESLOT;
             }
+        }
+        else if(mSimplexMode && mBufferBTimeslot == 0)
+        {
+            mBufferBTimeslot = 1;
+            mBufferATimeslot = 2;
         }
 
         dispatch(mMessageFactory.create(mBufferBPattern, burst, cach, getTimestamp(), mBufferBTimeslot));

@@ -22,6 +22,9 @@ package io.github.dsheirer.mqtt;
 import com.google.common.eventbus.Subscribe;
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
+import io.github.dsheirer.alias.Alias;
+import io.github.dsheirer.alias.AliasList;
+import io.github.dsheirer.alias.AliasModel;
 import io.github.dsheirer.channel.IChannelDescriptor;
 import io.github.dsheirer.eventbus.MyEventBus;
 import io.github.dsheirer.identifier.Identifier;
@@ -43,6 +46,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.StringJoiner;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -73,6 +77,7 @@ public class GpsMqttPublisher implements Listener<IDecodeEvent>
     private static final int QOS = 1;
 
     private final MqttPreference mPreference;
+    private final AliasModel mAliasModel;
     private static final Gson GSON = new Gson();
     private static final int TEST_SOURCE_ID = 2345678;
     private static final int TEST_DESTINATION_ID = 5057;
@@ -98,12 +103,23 @@ public class GpsMqttPublisher implements Listener<IDecodeEvent>
     private record LastPosition(double latitude, double longitude, long timestamp) {}
 
     /**
-     * Constructs an instance
+     * Constructs an instance without alias resolution
      * @param preference for MQTT settings
      */
     public GpsMqttPublisher(MqttPreference preference)
     {
+        this(preference, null);
+    }
+
+    /**
+     * Constructs an instance
+     * @param preference for MQTT settings
+     * @param aliasModel to resolve radio and talkgroup aliases for the published messages (may be null)
+     */
+    public GpsMqttPublisher(MqttPreference preference, AliasModel aliasModel)
+    {
         mPreference = preference;
+        mAliasModel = aliasModel;
         mSettings = loadSettings();
         mExecutor = new ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS,
                 new ArrayBlockingQueue<>(QUEUE_CAPACITY), runnable -> {
@@ -151,7 +167,7 @@ public class GpsMqttPublisher implements Listener<IDecodeEvent>
 
             if(matchesDestination(event.getIdentifierCollection(), settings.destinationIds()))
             {
-                String json = toJson(event, false);
+                String json = toJson(event, false, mAliasModel);
                 mExecutor.execute(() -> publish(settings, settings.topic(), json));
             }
         }
@@ -159,7 +175,8 @@ public class GpsMqttPublisher implements Listener<IDecodeEvent>
         else if(settings.alarmEnabled() && decodeEvent.getProtocol() == Protocol.DMR &&
                 decodeEvent.getEventType() == DecodeEventType.EMERGENCY)
         {
-            String json = toAlarmJson(decodeEvent, getLastPosition(decodeEvent.getIdentifierCollection()), false);
+            String json = toAlarmJson(decodeEvent, getLastPosition(decodeEvent.getIdentifierCollection()), false,
+                    mAliasModel);
             mExecutor.execute(() -> publish(settings, settings.alarmTopic(), json));
         }
     }
@@ -262,7 +279,7 @@ public class GpsMqttPublisher implements Listener<IDecodeEvent>
                 .build();
         event.setTimeslot(1);
 
-        return toJson(event, true);
+        return toJson(event, true, null);
     }
 
     /**
@@ -281,7 +298,7 @@ public class GpsMqttPublisher implements Listener<IDecodeEvent>
                 .build();
         event.setTimeslot(1);
 
-        return toAlarmJson(event, new LastPosition(51.50073, -0.12463, now - 60000), true);
+        return toAlarmJson(event, new LastPosition(51.50073, -0.12463, now - 60000), true, null);
     }
 
     /**
@@ -289,8 +306,9 @@ public class GpsMqttPublisher implements Listener<IDecodeEvent>
      * @param event emergency event
      * @param lastPosition of the alarming radio, or null when unknown
      * @param test true to mark the payload as a test message
+     * @param aliasModel to resolve aliases, or null
      */
-    private static String toAlarmJson(IDecodeEvent event, LastPosition lastPosition, boolean test)
+    private static String toAlarmJson(IDecodeEvent event, LastPosition lastPosition, boolean test, AliasModel aliasModel)
     {
         JsonObject json = new JsonObject();
 
@@ -310,6 +328,7 @@ public class GpsMqttPublisher implements Listener<IDecodeEvent>
         {
             addIdentifier(json, "from", identifiers.getFromIdentifier());
             addIdentifier(json, "to", identifiers.getToIdentifier());
+            addAliases(json, identifiers, aliasModel);
         }
 
         json.addProperty("timeslot", event.getTimeslot());
@@ -343,8 +362,9 @@ public class GpsMqttPublisher implements Listener<IDecodeEvent>
      * Creates the JSON payload for the position report.
      * @param event to convert
      * @param test true to mark the payload as a test message
+     * @param aliasModel to resolve aliases, or null
      */
-    private static String toJson(PlottableDecodeEvent event, boolean test)
+    private static String toJson(PlottableDecodeEvent event, boolean test, AliasModel aliasModel)
     {
         JsonObject json = new JsonObject();
 
@@ -364,6 +384,7 @@ public class GpsMqttPublisher implements Listener<IDecodeEvent>
         {
             addIdentifier(json, "from", identifiers.getFromIdentifier());
             addIdentifier(json, "to", identifiers.getToIdentifier());
+            addAliases(json, identifiers, aliasModel);
         }
 
         json.addProperty("latitude", event.getLocation().getLatitude());
@@ -385,6 +406,46 @@ public class GpsMqttPublisher implements Listener<IDecodeEvent>
         }
 
         return GSON.toJson(json);
+    }
+
+    /**
+     * Adds the alias names for the FROM and TO identifiers, using the channel's alias list, when available.
+     */
+    private static void addAliases(JsonObject json, IdentifierCollection identifiers, AliasModel aliasModel)
+    {
+        if(aliasModel == null)
+        {
+            return;
+        }
+
+        AliasList aliasList = aliasModel.getAliasList(identifiers);
+
+        if(aliasList != null)
+        {
+            addAlias(json, "from_alias", aliasList, identifiers.getFromIdentifier());
+            addAlias(json, "to_alias", aliasList, identifiers.getToIdentifier());
+        }
+    }
+
+    private static void addAlias(JsonObject json, String name, AliasList aliasList, Identifier identifier)
+    {
+        if(identifier != null)
+        {
+            StringJoiner names = new StringJoiner(", ");
+
+            for(Alias alias: aliasList.getAliases(identifier))
+            {
+                if(alias.getName() != null && !alias.getName().isBlank())
+                {
+                    names.add(alias.getName());
+                }
+            }
+
+            if(names.length() > 0)
+            {
+                json.addProperty(name, names.toString());
+            }
+        }
     }
 
     private static void addIdentifier(JsonObject json, String name, Identifier identifier)

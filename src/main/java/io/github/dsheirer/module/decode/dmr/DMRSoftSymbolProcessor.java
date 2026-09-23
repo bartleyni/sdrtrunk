@@ -71,6 +71,11 @@ public class DMRSoftSymbolProcessor
     //Sync gap (500 ms) after which a mobile/direct sync is treated as a new transmission from a possibly different
     //radio with a different carrier frequency offset, requiring full equalizer re-acquisition.
     private static final int NEW_TRANSMISSION_GAP_SYMBOLS = 2400;
+    //Sync gap (5 seconds) after which an automatically established sync mode lock is released so that the channel can
+    //adapt when the operating mode changes (e.g. repeater frequency also used for direct mode talkaround).
+    private static final int SYNC_MODE_RELEASE_SYMBOLS = 24000;
+    //Upper bound for the symbols since last sync counter to prevent integer overflow on long idle channels.
+    private static final int MAXIMUM_SYMBOLS_SINCE_LAST_SYNC = 1000000000;
     private static final float MAXIMUM_EQUALIZER_BALANCE = (float)(Math.PI / 3.0);
     private static final float MAXIMUM_EQUALIZER_GAIN = 1.25f;
     private static final float MAXIMUM_POSITIVE_SAMPLE_PHASE = 3.5f;
@@ -91,6 +96,7 @@ public class DMRSoftSymbolProcessor
     private boolean mFineSync = false;
     private boolean mEqualizerInitialized = false;
     private boolean mEqualizerReacquire = false;
+    private boolean mSimplexMode = false;
     private double mNoiseStandardDeviationThreshold;
     private double mSecondarySyncOffset;
     private double mSamplesPerSymbol;
@@ -133,6 +139,26 @@ public class DMRSoftSymbolProcessor
     public void setBaseStationMode(boolean enabled)
     {
         mSyncModeMonitor.setMode(enabled ? DMRSyncDetectMode.BASE_ONLY : DMRSyncDetectMode.AUTOMATIC);
+    }
+
+    /**
+     * Sets simplex (direct mode / talkaround) channel mode where every transmission originates from a handheld or
+     * mobile radio, regardless of the sync pattern the radio transmits.  Each new transmission fully re-acquires the
+     * carrier offset and the measured offsets are not used for channel/tuner frequency correction.
+     * @param enabled true for simplex channels.
+     */
+    public void setSimplexMode(boolean enabled)
+    {
+        mSimplexMode = enabled;
+    }
+
+    /**
+     * Indicates if the detected sync pattern is from a handheld/mobile radio transmission, either by the pattern type
+     * or because the channel is configured as a simplex channel.
+     */
+    private boolean isHandheldTransmission(DMRSyncPattern pattern)
+    {
+        return mSimplexMode || pattern.isMobileSyncPattern();
     }
 
     /**
@@ -232,7 +258,17 @@ public class DMRSoftSymbolProcessor
                     Dibit ejected = mDibitDelayLine.insert(symbol);
                     mMessageFramer.receive(ejected);
                     mDibitAssembler.receive(ejected);
-                    mSymbolsSinceLastSync++;
+
+                    if(mSymbolsSinceLastSync < MAXIMUM_SYMBOLS_SINCE_LAST_SYNC)
+                    {
+                        mSymbolsSinceLastSync++;
+                    }
+
+                    //Release any automatic sync mode lock after a prolonged quiet period
+                    if(mSymbolsSinceLastSync == SYNC_MODE_RELEASE_SYMBOLS)
+                    {
+                        mSyncModeMonitor.releaseAutomaticLock();
+                    }
 
                     if(mFineSync)
                     {
@@ -333,7 +369,7 @@ public class DMRSoftSymbolProcessor
      */
     private void updateSyncModeMonitorCoarse(DMRSyncPattern pattern)
     {
-        if(pattern.isMobileSyncPattern())
+        if(isHandheldTransmission(pattern))
         {
             mSyncModeMonitor.detected(pattern);
         }
@@ -433,7 +469,7 @@ public class DMRSoftSymbolProcessor
         //Mobile and direct mode transmissions can originate from different radios, each with a different carrier
         //frequency offset.  After a sync gap, fully re-acquire the equalizer instead of slowly adapting from the
         //previous radio's settings.  Base station channels are unaffected.
-        mEqualizerReacquire = mEqualizerInitialized && pattern.isMobileSyncPattern() &&
+        mEqualizerReacquire = mEqualizerInitialized && isHandheldTransmission(pattern) &&
                 mSymbolsSinceLastSync > NEW_TRANSMISSION_GAP_SYMBOLS;
 
         boolean resample = !mEqualizerInitialized || mEqualizerReacquire || (Math.abs(adjustment) > 0.25);
@@ -602,7 +638,7 @@ public class DMRSoftSymbolProcessor
 
         //Only base station syncs drive channel/tuner frequency correction.  Mobile and direct mode radios each have
         //their own carrier offset and would otherwise skew the tuner auto-PPM for all channels on the tuner.
-        if(!pattern.isMobileSyncPattern())
+        if(!isHandheldTransmission(pattern))
         {
             mFeedbackDecoder.processPLLError(mEqualizerBalance);
         }

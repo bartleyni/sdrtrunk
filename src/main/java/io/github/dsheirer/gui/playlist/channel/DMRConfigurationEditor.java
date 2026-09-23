@@ -83,6 +83,7 @@ public class DMRConfigurationEditor extends ChannelConfigurationEditor
     private ToggleSwitch mIgnoreDataCallsButton;
     private ToggleSwitch mIgnoreCRCChecksumsButton;
     private ToggleSwitch mUseCompressedTalkgroupsToggle;
+    private ToggleSwitch mSimplexModeToggle;
     private Spinner<Integer> mTrafficChannelPoolSizeSpinner;
     private TableView<TimeslotFrequency> mTimeslotFrequencyTable;
     private IntegerTextField mLogicalChannelNumberField;
@@ -171,6 +172,14 @@ public class DMRConfigurationEditor extends ChannelConfigurationEditor
             GridPane.setHalignment(useCompressedTalkgroupsLabel, HPos.LEFT);
             GridPane.setConstraints(useCompressedTalkgroupsLabel, 7, row);
             gridPane.getChildren().add(useCompressedTalkgroupsLabel);
+
+            GridPane.setConstraints(getSimplexModeToggle(), 2, ++row);
+            gridPane.getChildren().add(getSimplexModeToggle());
+
+            Label simplexModeLabel = new Label("Simplex / Direct Mode Channel (handheld to handheld, no repeater)");
+            GridPane.setHalignment(simplexModeLabel, HPos.LEFT);
+            GridPane.setConstraints(simplexModeLabel, 3, row, 5, 1);
+            gridPane.getChildren().add(simplexModeLabel);
 
             Label timeslotTableLabel = new Label("Logical Channel Number (LCN) to Frequency Map. Required for: Connect Plus and Tier-III systems that don't use absolute frequencies.  LSN = Logical Slot Number");
             GridPane.setHalignment(timeslotTableLabel, HPos.LEFT);
@@ -536,6 +545,26 @@ public class DMRConfigurationEditor extends ChannelConfigurationEditor
         return mUseCompressedTalkgroupsToggle;
     }
 
+    /**
+     * Simplex mode toggle switch.  Lets the user designate the channel as a simplex (direct mode / talkaround) channel
+     * where all transmissions come from handheld/mobile radios.
+     * @return toggle.
+     */
+    private ToggleSwitch getSimplexModeToggle()
+    {
+        if(mSimplexModeToggle == null)
+        {
+            mSimplexModeToggle = new ToggleSwitch();
+            mSimplexModeToggle.setTooltip(new Tooltip("Simplex / direct mode channel: all transmissions are from " +
+                    "handheld or mobile radios (no repeater).  Improves reception of each new radio's transmission.  " +
+                    "Do not use for repeater or trunked channels."));
+            mSimplexModeToggle.setDisable(true);
+            mSimplexModeToggle.selectedProperty().addListener((observable, oldValue, newValue) -> modifiedProperty().set(true));
+        }
+
+        return mSimplexModeToggle;
+    }
+
     private Spinner<Integer> getTrafficChannelPoolSizeSpinner()
     {
         if(mTrafficChannelPoolSizeSpinner == null)
@@ -603,6 +632,7 @@ public class DMRConfigurationEditor extends ChannelConfigurationEditor
         getIgnoreCRCChecksumsButton().setDisable(config == null);
         getIgnoreDataCallsButton().setDisable(config == null);
         getUseCompressedTalkgroupsToggle().setDisable(config == null);
+        getSimplexModeToggle().setDisable(config == null);
         getTrafficChannelPoolSizeSpinner().setDisable(config == null);
         getTimeslotTable().getItems().clear();
         getTimeslotTable().setDisable(config == null);
@@ -623,6 +653,7 @@ public class DMRConfigurationEditor extends ChannelConfigurationEditor
             getIgnoreDataCallsButton().setSelected(decodeConfig.getIgnoreDataCalls());
             getIgnoreCRCChecksumsButton().setSelected(decodeConfig.getIgnoreCRCChecksums());
             getUseCompressedTalkgroupsToggle().setSelected(decodeConfig.isUseCompressedTalkgroups());
+            getSimplexModeToggle().setSelected(decodeConfig.isSimplexMode());
             getTrafficChannelPoolSizeSpinner().getValueFactory().setValue(decodeConfig.getTrafficChannelPoolSize());
 
             for(TimeslotFrequency timeslotFrequency: decodeConfig.getTimeslotMap())
@@ -635,6 +666,7 @@ public class DMRConfigurationEditor extends ChannelConfigurationEditor
             getIgnoreCRCChecksumsButton().setSelected(false);
             getIgnoreDataCallsButton().setSelected(false);
             getUseCompressedTalkgroupsToggle().setSelected(false);
+            getSimplexModeToggle().setSelected(false);
             getTrafficChannelPoolSizeSpinner().getValueFactory().setValue(0);
             getChannelRotationDelaySpinner().getValueFactory().setValue(200);
         }
@@ -658,6 +690,7 @@ public class DMRConfigurationEditor extends ChannelConfigurationEditor
         config.setIgnoreDataCalls(getIgnoreDataCallsButton().isSelected());
         config.setTrafficChannelPoolSize(getTrafficChannelPoolSizeSpinner().getValue());
         config.setUseCompressedTalkgroups(getUseCompressedTalkgroupsToggle().isSelected());
+        config.setSimplexMode(getSimplexModeToggle().isSelected());
         config.setTimeslotMap(new ArrayList<>(getTimeslotTable().getItems()));
         getItem().setDecodeConfiguration(config);
     }

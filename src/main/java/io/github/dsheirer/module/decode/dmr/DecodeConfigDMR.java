@@ -41,6 +41,7 @@ public class DecodeConfigDMR extends DecodeConfiguration
     private boolean mIgnoreDataCalls = true;
     private boolean mIgnoreCRCChecksums = false;
     private boolean mUseCompressedTalkgroups = false;
+    private boolean mSimplexMode = false;
     private List<TimeslotFrequency> mTimeslotMap = new ArrayList<>();
 
     @JsonIgnore
@@ -136,6 +137,25 @@ public class DecodeConfigDMR extends DecodeConfiguration
      * Traffic channel pool size.
      * @return
      */
+    /**
+     * Indicates if this channel is a simplex (direct mode / talkaround) channel where all transmissions originate from
+     * mobile/portable radios rather than a repeater or trunked site.  Enables handheld-oriented decoding behavior
+     * regardless of the sync pattern the radios transmit.
+     */
+    @JacksonXmlProperty(isAttribute = true, localName = "simplex_mode")
+    public boolean isSimplexMode()
+    {
+        return mSimplexMode;
+    }
+
+    /**
+     * Sets simplex (direct mode / talkaround) channel mode.
+     */
+    public void setSimplexMode(boolean simplexMode)
+    {
+        mSimplexMode = simplexMode;
+    }
+
     @JacksonXmlProperty(isAttribute = true, localName = "traffic_channel_pool_size")
     public int getTrafficChannelPoolSize()
     {

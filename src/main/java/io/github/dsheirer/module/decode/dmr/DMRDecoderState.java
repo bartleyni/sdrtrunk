@@ -28,6 +28,8 @@ import io.github.dsheirer.controller.channel.Channel;
 import io.github.dsheirer.controller.channel.Channel.ChannelType;
 import io.github.dsheirer.controller.channel.ChannelConfigurationChangeNotification;
 import io.github.dsheirer.identifier.Form;
+import io.github.dsheirer.module.decode.dmr.message.voice.VoiceAMessage;
+import io.github.dsheirer.identifier.configuration.AliasListConfigurationIdentifier;
 import io.github.dsheirer.identifier.Identifier;
 import io.github.dsheirer.identifier.IdentifierClass;
 import io.github.dsheirer.identifier.IdentifierCollection;
@@ -135,6 +137,11 @@ public class DMRDecoderState extends TimeslotDecoderState
     private DMRTrafficChannelManager mTrafficChannelManager;
     private DecodeEvent mCurrentCallEvent;
     private boolean mEmergencyReported = false;
+    //Voice gap that indicates a new handheld transmission when the previous transmission's terminator was missed
+    private static final long CALL_GAP_MS = 500;
+    private boolean mSimplexMode = false;
+    private boolean mCallSplitEligible = false;
+    private long mLastVoiceTimestamp = 0;
     private boolean mIgnoreCRCChecksums;
     private DMRDecoderState mSisterDecoderState;
 
@@ -161,6 +168,8 @@ public class DMRDecoderState extends TimeslotDecoderState
         if(channel.getDecodeConfiguration() instanceof DecodeConfigDMR config)
         {
             mIgnoreCRCChecksums = config.getIgnoreCRCChecksums();
+            mSimplexMode = config.isSimplexMode() && !channel.isTrafficChannel();
+            mCallSplitEligible = mSimplexMode;
         }
     }
 
@@ -404,6 +413,7 @@ public class DMRDecoderState extends TimeslotDecoderState
             UDTNmeaLocation location = sms.getNmeaLocation();
             MutableIdentifierCollection mic = new MutableIdentifierCollection(sms.getIdentifiers());
             mic.update(location.getLocation());
+            addAliasListConfiguration(mic);
 
             PlottableDecodeEvent.PlottableDecodeEventBuilder builder = PlottableDecodeEvent
                     .plottableBuilder(DecodeEventType.GPS, sms.getTimestamp())
@@ -530,6 +540,7 @@ public class DMRDecoderState extends TimeslotDecoderState
         else if(packet.getPacket() instanceof LRRPPacket lrrp)
         {
             MutableIdentifierCollection mic = new MutableIdentifierCollection(packet.getIdentifiers());
+            addAliasListConfiguration(mic);
             Point2d point = null;
             Speed speed = null;
             Heading heading = null;
@@ -645,15 +656,36 @@ public class DMRDecoderState extends TimeslotDecoderState
      */
     private void processVoice(VoiceMessage message)
     {
-        if(message.getSyncPattern().isMobileSyncPattern())
+        DMRSyncPattern pattern = message.getSyncPattern();
+
+        //Handheld (mobile/direct mode or simplex channel) transmissions
+        if(mSimplexMode || pattern.isMobileSyncPattern())
         {
-            if(message.getSyncPattern().isDirect())
+            mCallSplitEligible = true;
+
+            //A gap in the voice indicates a new transmission when the previous transmission's terminator was missed.
+            if(mCurrentCallEvent != null && mLastVoiceTimestamp > 0 &&
+                    (message.getTimestamp() - mLastVoiceTimestamp) > CALL_GAP_MS)
             {
-                updateCurrentCall(DecodeEventType.CALL, "DIRECT MODE", message.getTimestamp());
+                long previousVoiceTimestamp = mLastVoiceTimestamp;
+                closeCurrentCallEvent(previousVoiceTimestamp);
+                getIdentifierCollection().remove(IdentifierClass.USER, Role.FROM);
+                mCallSplitEligible = true;
+            }
+
+            mLastVoiceTimestamp = message.getTimestamp();
+
+            //Update the call event at the start of the call and once per voice superframe (Voice A) to limit the
+            //processing load of copying identifiers and broadcasting the event on every voice burst.
+            if(mCurrentCallEvent == null || message instanceof VoiceAMessage)
+            {
+                String details = pattern.isDirect() ? "DIRECT MODE" :
+                        (pattern.isMobileSyncPattern() ? "REPEATER" : "SIMPLEX");
+                updateCurrentCall(DecodeEventType.CALL, details, message.getTimestamp());
             }
             else
             {
-                updateCurrentCall(DecodeEventType.CALL, "REPEATER", message.getTimestamp());
+                broadcast(new DecoderStateEvent(this, Event.CONTINUATION, State.CALL, getTimeslot()));
             }
         }
         else
@@ -1535,6 +1567,14 @@ public class DMRDecoderState extends TimeslotDecoderState
      */
     private void updateCurrentCall(DecodeEventType type, String details, long timestamp)
     {
+        //When a different radio starts talking on a handheld (simplex/direct mode) channel without an intervening
+        //terminator, close the previous talker's call event and start a new one.
+        if(mCurrentCallEvent != null && mCallSplitEligible && isNewTalker())
+        {
+            closeCurrentCallEvent(mLastVoiceTimestamp > 0 ? mLastVoiceTimestamp : timestamp);
+            mCallSplitEligible = true;
+        }
+
         Event event = (mCurrentCallEvent == null ? Event.START : Event.CONTINUATION);
 
         //Create a repeater channel descriptor if we don't have one
@@ -1589,9 +1629,36 @@ public class DMRDecoderState extends TimeslotDecoderState
      *
      * @param timestamp of the message that indicates the event has ended.
      */
+    /**
+     * Indicates if the current FROM radio differs from the FROM radio of the current call event.
+     */
+    private boolean isNewTalker()
+    {
+        Identifier eventFrom = mCurrentCallEvent.getIdentifierCollection() != null ?
+                mCurrentCallEvent.getIdentifierCollection().getIdentifier(IdentifierClass.USER, Form.RADIO, Role.FROM) : null;
+        Identifier currentFrom = getIdentifierCollection().getIdentifier(IdentifierClass.USER, Form.RADIO, Role.FROM);
+        return eventFrom != null && currentFrom != null && !eventFrom.getValue().equals(currentFrom.getValue());
+    }
+
+    /**
+     * Adds this channel's alias list configuration to the identifier collection so that downstream consumers (map,
+     * MQTT) can resolve aliases for identifiers that were created from a message rather than this decoder state.
+     */
+    private void addAliasListConfiguration(MutableIdentifierCollection identifierCollection)
+    {
+        AliasListConfigurationIdentifier aliasList = getIdentifierCollection().getAliasListConfiguration();
+
+        if(aliasList != null)
+        {
+            identifierCollection.update(aliasList);
+        }
+    }
+
     private void closeCurrentCallEvent(long timestamp)
     {
         mEmergencyReported = false;
+        mCallSplitEligible = mSimplexMode;
+        mLastVoiceTimestamp = 0;
 
         if(mCurrentCallEvent != null)
         {

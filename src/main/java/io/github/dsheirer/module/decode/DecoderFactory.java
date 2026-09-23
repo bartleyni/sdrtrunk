@@ -612,8 +612,13 @@ public class DecoderFactory
 
         modules.add(state1);
         modules.add(state2);
-        modules.add(new DMRAudioModule(userPreferences, aliasList, DMRMessage.TIMESLOT_1));
-        modules.add(new DMRAudioModule(userPreferences, aliasList, DMRMessage.TIMESLOT_2));
+        DMRAudioModule audio1 = new DMRAudioModule(userPreferences, aliasList, DMRMessage.TIMESLOT_1);
+        DMRAudioModule audio2 = new DMRAudioModule(userPreferences, aliasList, DMRMessage.TIMESLOT_2);
+        boolean simplex = decodeConfig.isSimplexMode() && !channel.isTrafficChannel();
+        audio1.setSimplexMode(simplex);
+        audio2.setSimplexMode(simplex);
+        modules.add(audio1);
+        modules.add(audio2);
 
         //Add a channel rotation monitor when we have multiple control channel frequencies specified
         if(channel.getSourceConfiguration() instanceof SourceConfigTunerMultipleFrequency sctmf &&

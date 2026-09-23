@@ -115,6 +115,11 @@ public class DMRDecoder extends FeedbackDecoder implements IByteBufferProvider, 
         {
             mSymbolProcessor.setBaseStationMode(true);
         }
+        else if(config.isSimplexMode())
+        {
+            mSymbolProcessor.setSimplexMode(true);
+            mMessageFramer.setSimplexMode(true);
+        }
     }
 
     @Override

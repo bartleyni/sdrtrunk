@@ -221,7 +221,7 @@ public class SDRTrunk implements Listener<TunerEvent>
         MapService mapService = new MapService(aliasModel, mIconModel);
         mPlaylistManager.getChannelProcessingManager().addDecodeEventListener(mapService);
 
-        mGpsMqttPublisher = new GpsMqttPublisher(mUserPreferences.getMqttPreference());
+        mGpsMqttPublisher = new GpsMqttPublisher(mUserPreferences.getMqttPreference(), aliasModel);
         mPlaylistManager.getChannelProcessingManager().addDecodeEventListener(mGpsMqttPublisher);
 
         mNowPlayingDetailsVisible = mPreferences.getBoolean(PREFERENCE_NOW_PLAYING_DETAILS_VISIBLE, true);

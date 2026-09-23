@@ -22,6 +22,9 @@ import io.github.dsheirer.alias.AliasList;
 import io.github.dsheirer.audio.codec.mbe.AmbeAudioModule;
 import io.github.dsheirer.audio.squelch.SquelchState;
 import io.github.dsheirer.audio.squelch.SquelchStateEvent;
+import io.github.dsheirer.identifier.Form;
+import io.github.dsheirer.identifier.Identifier;
+import io.github.dsheirer.identifier.IdentifierClass;
 import io.github.dsheirer.identifier.IdentifierUpdateNotification;
 import io.github.dsheirer.identifier.IdentifierUpdateProvider;
 import io.github.dsheirer.identifier.Role;
@@ -65,6 +68,12 @@ public class DMRAudioModule extends AmbeAudioModule implements IdentifierUpdateP
     private boolean mEncryptedCallStateEstablished = false;
     private boolean mEncryptedCall = false;
     private Listener<IMessage> mMessageListener;
+    //Voice gap that indicates a new handheld transmission when the previous transmission's terminator was missed
+    private static final long CALL_GAP_MS = 500;
+    private boolean mSimplexMode = false;
+    private boolean mHandheldCall = false;
+    private long mLastVoiceTimestamp = 0;
+    private final Listener<IdentifierUpdateNotification> mIdentifierUpdateInterceptor = this::interceptIdentifierUpdate;
 
     /**
      * Constructs an instance
@@ -75,6 +84,56 @@ public class DMRAudioModule extends AmbeAudioModule implements IdentifierUpdateP
     public DMRAudioModule(UserPreferences userPreferences, AliasList aliasList, int timeslot)
     {
         super(userPreferences, aliasList, timeslot);
+    }
+
+    /**
+     * Sets simplex (direct mode / talkaround) channel mode so that every transmission is treated as a handheld
+     * transmission for audio segment splitting.
+     * @param simplexMode true for simplex channels
+     */
+    public void setSimplexMode(boolean simplexMode)
+    {
+        mSimplexMode = simplexMode;
+    }
+
+    /**
+     * Intercepts identifier updates from the decoder states so that, for handheld (simplex/direct mode) calls, a
+     * change of talker closes the current audio segment before the new talker's identifier is applied.  This prevents
+     * the previous talker's recording from being labelled with the new talker's radio ID.
+     */
+    @Override
+    public Listener<IdentifierUpdateNotification> getIdentifierUpdateListener()
+    {
+        return mIdentifierUpdateInterceptor;
+    }
+
+    private void interceptIdentifierUpdate(IdentifierUpdateNotification notification)
+    {
+        if((mSimplexMode || mHandheldCall) && notification.isAdd() && hasAudioSegment() &&
+                notification.getIdentifier().getIdentifierClass() == IdentifierClass.USER &&
+                notification.getIdentifier().getForm() == Form.RADIO &&
+                notification.getIdentifier().getRole() == Role.FROM)
+        {
+            Identifier current = mIdentifierCollection.getIdentifier(IdentifierClass.USER, Form.RADIO, Role.FROM);
+
+            if(current != null && !current.getValue().equals(notification.getIdentifier().getValue()))
+            {
+                startNewTransmission();
+            }
+        }
+
+        super.getIdentifierUpdateListener().receive(notification);
+    }
+
+    /**
+     * Closes the current audio segment and resets the encryption state for a new handheld transmission.
+     */
+    private void startNewTransmission()
+    {
+        closeAudioSegment();
+        mEncryptedCall = false;
+        mEncryptedCallStateEstablished = false;
+        mQueuedAmbeFrames.clear();
     }
 
     @Override
@@ -92,6 +151,8 @@ public class DMRAudioModule extends AmbeAudioModule implements IdentifierUpdateP
         mEncryptedCall = false;
         mEncryptedCallStateEstablished = false;
         mQueuedAmbeFrames.clear();
+        mHandheldCall = false;
+        mLastVoiceTimestamp = 0;
     }
 
     @Override
@@ -106,6 +167,22 @@ public class DMRAudioModule extends AmbeAudioModule implements IdentifierUpdateP
     {
         if(hasAudioCodec() && message.getTimeslot() == getTimeslot())
         {
+            //Handheld (simplex/direct mode) transmissions: a voice gap indicates a new transmission when the previous
+            //transmission's terminator was missed, so start a new audio segment.
+            if(message instanceof VoiceMessage handheldVoice &&
+                    (mSimplexMode || handheldVoice.getSyncPattern().isMobileSyncPattern()))
+            {
+                mHandheldCall = true;
+
+                if(mLastVoiceTimestamp > 0 && (handheldVoice.getTimestamp() - mLastVoiceTimestamp) > CALL_GAP_MS &&
+                        hasAudioSegment())
+                {
+                    startNewTransmission();
+                }
+
+                mLastVoiceTimestamp = handheldVoice.getTimestamp();
+            }
+
             //Attempt to set the audio encryption state from certain types of messages
             if(!mEncryptedCallStateEstablished)
             {

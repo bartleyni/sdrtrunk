@@ -35,6 +35,7 @@ public class DMRSyncModeMonitor
     private int mMobileCount;
     private int mDirectCount;
     private DMRSyncDetectMode mMode = DMRSyncDetectMode.AUTOMATIC;
+    private boolean mAutoLocked = false;
 
     /**
      * Constructs an instance
@@ -51,12 +52,57 @@ public class DMRSyncModeMonitor
      */
     public void setMode(DMRSyncDetectMode mode)
     {
+        mAutoLocked = false;
+        applyMode(mode);
+    }
+
+    /**
+     * Applies the mode to this monitor and each of the managed sync detectors.
+     */
+    private void applyMode(DMRSyncDetectMode mode)
+    {
         mMode = mode;
 
         for(DMRSyncDetector detector : mSyncDetectors)
         {
             detector.setMode(mode);
         }
+    }
+
+    /**
+     * Automatically locks the sync detection mode once the dominant mode is established.  Unlike setMode(), an
+     * automatic lock can be released via releaseAutomaticLock().
+     */
+    private void autoLock(DMRSyncDetectMode mode)
+    {
+        applyMode(mode);
+        mAutoLocked = true;
+    }
+
+    /**
+     * Releases an automatically established sync mode lock and returns to AUTOMATIC detection with cleared counts so
+     * that the dominant mode can be re-established.  This supports channels where the mode can change over time,
+     * for example a repeater frequency that is also used for direct mode (talkaround).  Explicitly set modes (e.g. a
+     * trunked traffic channel locked to BASE_ONLY) are not affected.
+     */
+    public void releaseAutomaticLock()
+    {
+        if(mAutoLocked)
+        {
+            mAutoLocked = false;
+            mBaseCount = 0;
+            mMobileCount = 0;
+            mDirectCount = 0;
+            applyMode(DMRSyncDetectMode.AUTOMATIC);
+        }
+    }
+
+    /**
+     * Current sync detection mode
+     */
+    public DMRSyncDetectMode getMode()
+    {
+        return mMode;
     }
 
     /**
@@ -92,15 +138,15 @@ public class DMRSyncModeMonitor
 
         if(mBaseCount - mMobileCount > DOMINANT_THRESHOLD && mBaseCount - mDirectCount > DOMINANT_THRESHOLD)
         {
-            setMode(DMRSyncDetectMode.BASE_ONLY);
+            autoLock(DMRSyncDetectMode.BASE_ONLY);
         }
         else if(mMobileCount - mBaseCount > DOMINANT_THRESHOLD && mMobileCount - mDirectCount > DOMINANT_THRESHOLD)
         {
-            setMode(DMRSyncDetectMode.MOBILE_ONLY);
+            autoLock(DMRSyncDetectMode.MOBILE_ONLY);
         }
         else if(mDirectCount - mBaseCount > DOMINANT_THRESHOLD && mDirectCount - mMobileCount > DOMINANT_THRESHOLD)
         {
-            setMode(DMRSyncDetectMode.DIRECT_ONLY);
+            autoLock(DMRSyncDetectMode.DIRECT_ONLY);
         }
     }
 

@@ -102,6 +102,17 @@ public abstract class AbstractAudioModule extends Module implements IAudioSegmen
     }
 
     /**
+     * Indicates if there is a current (open) audio segment.
+     */
+    protected boolean hasAudioSegment()
+    {
+        synchronized(this)
+        {
+            return mAudioSegment != null;
+        }
+    }
+
+    /**
      * Gets the current audio segment, or creates a new audio segment as necessary and broadcasts it to any registered
      * listener(s).
      */
