@@ -33,6 +33,7 @@ import javafx.scene.control.TextField;
 import javafx.scene.layout.GridPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
+import java.nio.charset.StandardCharsets;
 import org.eclipse.paho.client.mqttv3.MqttClient;
 
 /**
@@ -51,6 +52,7 @@ public class MqttPreferenceEditor extends HBox
     private TextField mDestinationIdTextField;
     private Button mSaveButton;
     private Button mTestButton;
+    private Button mSendTestMessageButton;
     private Label mStatusLabel;
 
     /**
@@ -84,7 +86,7 @@ public class MqttPreferenceEditor extends HBox
             row = addRow("Topic:", getTopicTextField(), row);
             row = addRow("Sent To IDs:", getDestinationIdTextField(), row);
 
-            HBox buttons = new HBox(10, getSaveButton(), getTestButton());
+            HBox buttons = new HBox(10, getSaveButton(), getTestButton(), getSendTestMessageButton());
             mEditorPane.add(buttons, 1, row++);
             mEditorPane.add(getStatusLabel(), 1, row++);
 
@@ -221,6 +223,17 @@ public class MqttPreferenceEditor extends HBox
         return mTestButton;
     }
 
+    private Button getSendTestMessageButton()
+    {
+        if(mSendTestMessageButton == null)
+        {
+            mSendTestMessageButton = new Button("Send Test Message");
+            mSendTestMessageButton.setOnAction(event -> sendTestMessage());
+        }
+
+        return mSendTestMessageButton;
+    }
+
     /**
      * Validates the entered values.
      * @return error message or null when valid.
@@ -278,6 +291,25 @@ public class MqttPreferenceEditor extends HBox
      */
     private void testConnection()
     {
+        runBrokerTest(false);
+    }
+
+    /**
+     * Publishes an example DMR APRS position report, marked as a test message, to the entered topic using the
+     * entered broker settings.
+     */
+    private void sendTestMessage()
+    {
+        runBrokerTest(true);
+    }
+
+    /**
+     * Connects to the broker using the entered (not necessarily saved) settings on a background thread, optionally
+     * publishes a test message, and reports the outcome in the status label.
+     * @param publishTestMessage true to publish an example position report after connecting
+     */
+    private void runBrokerTest(boolean publishTestMessage)
+    {
         String error = validate();
 
         if(error != null)
@@ -292,9 +324,15 @@ public class MqttPreferenceEditor extends HBox
                 getClientIdTextField().getText().trim()) + "-test";
         String userName = getUserNameTextField().getText();
         String password = getPasswordField().getText();
+        String topic = getTopicTextField().getText().isBlank() ? MqttPreference.DEFAULT_TOPIC :
+                getTopicTextField().getText().trim();
+        String payload = GpsMqttPublisher.createTestMessage(
+                MqttPreference.parseIds(getDestinationIdTextField().getText()));
 
         getTestButton().setDisable(true);
-        getStatusLabel().setText("Testing connection to " + server + " ...");
+        getSendTestMessageButton().setDisable(true);
+        getStatusLabel().setText((publishTestMessage ? "Sending test message to " : "Testing connection to ") +
+                server + " ...");
 
         Thread thread = new Thread(() -> {
             String result;
@@ -302,18 +340,34 @@ public class MqttPreferenceEditor extends HBox
             try
             {
                 MqttClient client = GpsMqttPublisher.connect(server, clientId, userName, password);
-                GpsMqttPublisher.closeQuietly(client);
-                result = "Connection successful";
+
+                try
+                {
+                    if(publishTestMessage)
+                    {
+                        client.publish(topic, payload.getBytes(StandardCharsets.UTF_8), 1, false);
+                        result = "Test message sent to topic [" + topic + "]";
+                    }
+                    else
+                    {
+                        result = "Connection successful";
+                    }
+                }
+                finally
+                {
+                    GpsMqttPublisher.closeQuietly(client);
+                }
             }
             catch(Exception e)
             {
-                result = "Connection failed: " + e.getMessage();
+                result = (publishTestMessage ? "Send failed: " : "Connection failed: ") + e.getMessage();
             }
 
             String status = result;
             Platform.runLater(() -> {
                 getStatusLabel().setText(status);
                 getTestButton().setDisable(false);
+                getSendTestMessageButton().setDisable(false);
             });
         }, "sdrtrunk mqtt connection test");
         thread.setDaemon(true);

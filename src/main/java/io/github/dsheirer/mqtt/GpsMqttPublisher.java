@@ -28,6 +28,7 @@ import io.github.dsheirer.identifier.Identifier;
 import io.github.dsheirer.identifier.IdentifierClass;
 import io.github.dsheirer.identifier.IdentifierCollection;
 import io.github.dsheirer.identifier.Role;
+import io.github.dsheirer.module.decode.dmr.identifier.DMRRadio;
 import io.github.dsheirer.module.decode.event.DecodeEventType;
 import io.github.dsheirer.module.decode.event.IDecodeEvent;
 import io.github.dsheirer.module.decode.event.PlottableDecodeEvent;
@@ -37,6 +38,7 @@ import io.github.dsheirer.protocol.Protocol;
 import io.github.dsheirer.sample.Listener;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -45,6 +47,7 @@ import org.eclipse.paho.client.mqttv3.MqttClient;
 import org.eclipse.paho.client.mqttv3.MqttConnectOptions;
 import org.eclipse.paho.client.mqttv3.MqttException;
 import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence;
+import org.jdesktop.swingx.mapviewer.GeoPosition;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -65,7 +68,9 @@ public class GpsMqttPublisher implements Listener<IDecodeEvent>
     private static final int QOS = 1;
 
     private final MqttPreference mPreference;
-    private final Gson mGson = new Gson();
+    private static final Gson GSON = new Gson();
+    private static final int TEST_SOURCE_ID = 2345678;
+    private static final int TEST_DESTINATION_ID = 5057;
     private final ThreadPoolExecutor mExecutor;
     private volatile Settings mSettings;
 
@@ -125,7 +130,7 @@ public class GpsMqttPublisher implements Listener<IDecodeEvent>
         if(settings.enabled() && decodeEvent instanceof PlottableDecodeEvent event && isDmrPosition(event) &&
                 matchesDestination(event.getIdentifierCollection(), settings.destinationIds()))
         {
-            String json = toJson(event);
+            String json = toJson(event, false);
             mExecutor.execute(() -> publish(settings, json));
         }
     }
@@ -164,11 +169,45 @@ public class GpsMqttPublisher implements Listener<IDecodeEvent>
     }
 
     /**
-     * Creates the JSON payload for the position report.
+     * Creates an example DMR APRS position report JSON payload, marked as a test message, for verifying the broker
+     * and any downstream consumers.
+     * @param destinationIds from the filter.  The first ID is used as the destination so that the example matches
+     * the filter, otherwise a default APRS gateway ID is used.
+     * @return JSON payload
      */
-    private String toJson(PlottableDecodeEvent event)
+    public static String createTestMessage(Set<Integer> destinationIds)
+    {
+        int destination = destinationIds == null || destinationIds.isEmpty() ? TEST_DESTINATION_ID :
+                destinationIds.iterator().next();
+
+        PlottableDecodeEvent event = PlottableDecodeEvent.plottableBuilder(DecodeEventType.GPS, System.currentTimeMillis())
+                .protocol(Protocol.DMR)
+                .identifiers(new IdentifierCollection(List.of(DMRRadio.createFrom(TEST_SOURCE_ID),
+                        DMRRadio.createTo(destination))))
+                .location(new GeoPosition(51.50073, -0.12463))
+                .speed(18.52)
+                .heading(90)
+                .details("SDRTRUNK TEST MESSAGE - EXAMPLE DMR APRS POSITION REPORT")
+                .build();
+        event.setTimeslot(1);
+
+        return toJson(event, true);
+    }
+
+    /**
+     * Creates the JSON payload for the position report.
+     * @param event to convert
+     * @param test true to mark the payload as a test message
+     */
+    private static String toJson(PlottableDecodeEvent event, boolean test)
     {
         JsonObject json = new JsonObject();
+
+        if(test)
+        {
+            json.addProperty("test", true);
+        }
+
         json.addProperty("timestamp", Instant.ofEpochMilli(event.getTimeStart()).toString());
         json.addProperty("epoch_ms", event.getTimeStart());
         json.addProperty("protocol", event.getProtocol().toString());
@@ -200,7 +239,7 @@ public class GpsMqttPublisher implements Listener<IDecodeEvent>
             json.addProperty("details", event.getDetails());
         }
 
-        return mGson.toJson(json);
+        return GSON.toJson(json);
     }
 
     private static void addIdentifier(JsonObject json, String name, Identifier identifier)

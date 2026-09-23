@@ -200,6 +200,34 @@ public class GpsMqttPublisherTest
     }
 
     @Test
+    void sendsTestMessage() throws Exception
+    {
+        MqttClient client = GpsMqttPublisher.connect(mServerUri, "sdrtrunk-test-message", "", "");
+
+        try
+        {
+            client.publish(TOPIC, GpsMqttPublisher.createTestMessage(Set.of(310999))
+                    .getBytes(StandardCharsets.UTF_8), 1, false);
+        }
+        finally
+        {
+            GpsMqttPublisher.closeQuietly(client);
+        }
+
+        String payload = mReceived.poll(10, TimeUnit.SECONDS);
+        assertNotNull(payload, "No MQTT test message received");
+        JsonObject json = JsonParser.parseString(payload).getAsJsonObject();
+        assertTrue(json.get("test").getAsBoolean());
+        assertEquals("DMR", json.get("protocol").getAsString());
+        assertEquals(310999, json.get("to").getAsInt());
+        assertEquals(51.50073, json.get("latitude").getAsDouble(), 0.000001);
+
+        //Default destination when no filter is set
+        assertEquals(5057, JsonParser.parseString(GpsMqttPublisher.createTestMessage(Set.of()))
+                .getAsJsonObject().get("to").getAsInt());
+    }
+
+    @Test
     void parsesDestinationIds()
     {
         assertEquals(Set.of(5057, 310999), MqttPreference.parseIds(" 5057, 310999 "));
