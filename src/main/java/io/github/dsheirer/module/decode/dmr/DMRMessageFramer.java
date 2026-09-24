@@ -125,6 +125,17 @@ public class DMRMessageFramer implements Listener<Dibit>
     }
 
     /**
+     * Indicates if the framer is currently accounting for the presumed empty alternate timeslot of a mobile or direct
+     * mode transmission.  Some radios transmit bursts in both timeslots, so the symbol processor still checks for a
+     * sync in this timeslot.
+     */
+    public boolean isAssemblingEmptyTimeslot()
+    {
+        return mAssemblingBurst && ((mBufferAActive && mBufferAPattern == DMRSyncPattern.DIRECT_EMPTY_TIMESLOT) ||
+                (!mBufferAActive && mBufferBPattern == DMRSyncPattern.DIRECT_EMPTY_TIMESLOT));
+    }
+
+    /**
      * Indicates if the framer is assembling a burst and the active timeslot is assembling a voice superframe.
      */
     public boolean isVoiceSuperFrame()

@@ -208,6 +208,25 @@ public class PacketSequenceAssemblerTest
     }
 
     @Test
+    void recoversFirstReportAfterStartupWhenHeaderLost()
+    {
+        List<IMessage> dispatched = new ArrayList<>();
+        PacketSequenceAssembler assembler = new PacketSequenceAssembler();
+        assembler.setMessageListener(dispatched::add);
+
+        //18:47:00 - first report after startup (no prior format known), header lost, intact data block
+        assembler.process(capturedPreamble(1000));
+        assembler.process(capturedBlock("500CCC0F6408B40180832E64", 2000));
+        assembler.dispatchPendingSequences();
+
+        assertEquals(1, dispatched.size(), "First report after startup should be recovered");
+        UDTShortMessageService sms = (UDTShortMessageService)dispatched.get(0);
+        assertTrue(sms.isHeaderRecovered());
+        assertTrue(sms.isNmeaLocation());
+        assertEquals(51.2016, sms.getNmeaLocation().getLatitude(), 0.0001);
+    }
+
+    @Test
     void doesNotRecoverCorruptedHeaderlessBlock()
     {
         List<IMessage> dispatched = new ArrayList<>();

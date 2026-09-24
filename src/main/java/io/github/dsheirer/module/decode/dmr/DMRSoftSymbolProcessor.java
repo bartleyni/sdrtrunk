@@ -71,6 +71,11 @@ public class DMRSoftSymbolProcessor
     //Sync gap (500 ms) after which a mobile/direct sync is treated as a new transmission from a possibly different
     //radio with a different carrier frequency offset, requiring full equalizer re-acquisition.
     private static final int NEW_TRANSMISSION_GAP_SYMBOLS = 2400;
+    //Handheld (mobile/direct mode) timing tracking: fine timing search range (in fine increments) and the loop gain
+    //for tracking the transmitting radio's actual symbol period.  Handheld radios can have symbol clock errors of
+    //~100 ppm and direct mode syncs are 288 symbols apart, so a wider search and symbol period tracking are required.
+    private static final int HANDHELD_FINE_SEARCH_STEPS = 10;
+    private static final double HANDHELD_SYMBOL_PERIOD_LOOP_GAIN = 0.5;
     //Sync gap (5 seconds) after which an automatically established sync mode lock is released so that the channel can
     //adapt when the operating mode changes (e.g. repeater frequency also used for direct mode talkaround).
     private static final int SYNC_MODE_RELEASE_SYMBOLS = 24000;
@@ -111,6 +116,8 @@ public class DMRSoftSymbolProcessor
     private int mBufferPointer;
     private int mBufferWorkspaceLength;
     private int mSymbolsSinceLastSync = 0;
+    private int mSymbolsSinceTimingUpdate = 0;
+    private double mLastCoarseAdjustment = 0;
     private SyncResultsViewer mSyncResultsViewer;
     private FeedbackDecoder mFeedbackDecoder;
 
@@ -264,6 +271,11 @@ public class DMRSoftSymbolProcessor
                         mSymbolsSinceLastSync++;
                     }
 
+                    if(mSymbolsSinceTimingUpdate < MAXIMUM_SYMBOLS_SINCE_LAST_SYNC)
+                    {
+                        mSymbolsSinceTimingUpdate++;
+                    }
+
                     //Release any automatic sync mode lock after a prolonged quiet period
                     if(mSymbolsSinceLastSync == SYNC_MODE_RELEASE_SYMBOLS)
                     {
@@ -274,7 +286,11 @@ public class DMRSoftSymbolProcessor
                     {
                         if(mSymbolsSinceLastSync >= 144)
                         {
-                            if(mMessageFramer.isVoiceSuperFrame())
+                            //Mobile/direct mode transmissions normally leave the alternate timeslot empty, but some
+                            //radios (e.g. Ailunce HD2) transmit bursts in both timeslots, so check for a sync there.
+                            boolean emptyTimeslot = mMessageFramer.isAssemblingEmptyTimeslot();
+
+                            if(mMessageFramer.isVoiceSuperFrame() && !emptyTimeslot)
                             {
                                 mSymbolsSinceLastSync -= 144;
                             }
@@ -294,6 +310,27 @@ public class DMRSoftSymbolProcessor
                                     mSyncModeMonitor.detected(mSyncDetector.getDetectedPattern());
                                     mMessageFramer.syncDetected(mSyncDetector.getDetectedPattern());
                                     mSymbolsSinceLastSync = 0;
+                                    mSymbolsSinceTimingUpdate = 0;
+                                }
+                                //Mobile/direct mode transmissions have an empty alternate timeslot, so there are 288
+                                //symbols between syncs (vs 144 on a repeater) and the symbol timing drifts further
+                                //between the transmitting radio and the receiver.  When the fine timing check fails,
+                                //re-optimize the timing with the coarse search at the expected sync position instead
+                                //of dropping the burst.
+                                else if(primaryScore > SYNC_DETECTION_THRESHOLD &&
+                                        isHandheldTransmission(mSyncDetector.getDetectedPattern()) &&
+                                        optimizeCoarse(mSyncDetector.getDetectedPattern(), 0))
+                                {
+                                    updateSymbolPeriod(mLastCoarseAdjustment);
+                                    mSyncModeMonitor.detected(mSyncDetector.getDetectedPattern());
+                                    mMessageFramer.syncDetected(mSyncDetector.getDetectedPattern());
+                                    mSymbolsSinceLastSync = 0;
+                                    mSymbolsSinceTimingUpdate = 0;
+                                }
+                                else if(emptyTimeslot)
+                                {
+                                    //No burst in the (normally empty) alternate timeslot - remain in fine sync
+                                    mSymbolsSinceLastSync -= 144;
                                 }
                                 else
                                 {
@@ -321,6 +358,7 @@ public class DMRSoftSymbolProcessor
                             mMessageFramer.syncDetected(mSyncDetector.getDetectedPattern());
                             mFineSync = true;
                             mSymbolsSinceLastSync = 0;
+                            mSymbolsSinceTimingUpdate = 0;
                         }
                         else if(secondaryScore > SYNC_DETECTION_THRESHOLD && optimizeCoarse(mSyncDetectorSecondary.getDetectedPattern(), -mSecondarySyncOffset))
                         {
@@ -328,6 +366,7 @@ public class DMRSoftSymbolProcessor
                             mMessageFramer.syncDetected(mSyncDetectorSecondary.getDetectedPattern());
                             mFineSync = true;
                             mSymbolsSinceLastSync = 0;
+                            mSymbolsSinceTimingUpdate = 0;
                         }
                     }
 
@@ -385,6 +424,12 @@ public class DMRSoftSymbolProcessor
      */
     private boolean optimizeCoarse(DMRSyncPattern pattern, double additionalOffset)
     {
+        //Symbol period tracking only applies to handheld transmissions - base station timing uses the nominal period
+        if(!isHandheldTransmission(pattern))
+        {
+            resetSymbolPeriod();
+        }
+
         //Offset is the start of the first sample of the first symbol of the sync pattern calculated from the current
         //buffer pointer and sample point which should be the final sample of the final symbol of the detected sync.
         double offset = mBufferPointer + mSamplePoint + additionalOffset;
@@ -451,6 +496,7 @@ public class DMRSoftSymbolProcessor
             return false;
         }
 
+        mLastCoarseAdjustment = adjustment;
         adjustment += additionalOffset;
         mSamplePoint += adjustment;
 
@@ -520,12 +566,107 @@ public class DMRSoftSymbolProcessor
     }
 
     /**
+     * Fine timing optimization for handheld (mobile/direct mode) transmissions.  Searches a wider timing range than
+     * the base station fine optimization and uses the measured timing error to track the transmitting radio's actual
+     * symbol period, so that timing drift from radio symbol clock error doesn't accumulate between the widely spaced
+     * (288 symbol) direct mode syncs.
+     * @param pattern that was detected
+     * @return true if detection score exceeds the equalized threshold for a quality sync detect.
+     */
+    private boolean optimizeFineHandheld(DMRSyncPattern pattern)
+    {
+        double offset = mBufferPointer + mSamplePoint;
+        float bestScore = score(offset, mObservedSamplesPerSymbol, pattern);
+        double bestAdjustment = 0;
+
+        for(int step = 1; step <= HANDHELD_FINE_SEARCH_STEPS; step++)
+        {
+            double adjustment = step * mOptimizeFineIncrement;
+            float earlier = score(offset - adjustment, mObservedSamplesPerSymbol, pattern);
+            float later = score(offset + adjustment, mObservedSamplesPerSymbol, pattern);
+
+            if(earlier > bestScore)
+            {
+                bestScore = earlier;
+                bestAdjustment = -adjustment;
+            }
+
+            if(later > bestScore)
+            {
+                bestScore = later;
+                bestAdjustment = adjustment;
+            }
+        }
+
+        if(bestAdjustment != 0)
+        {
+            mSamplePoint += bestAdjustment;
+
+            while(mSamplePoint < 0)
+            {
+                mSamplePoint++;
+                mBufferPointer--;
+            }
+
+            while(mSamplePoint > 1)
+            {
+                mSamplePoint--;
+                mBufferPointer++;
+            }
+        }
+
+        if(bestScore > SYNC_EQUALIZED_THRESHOLD)
+        {
+            updateSymbolPeriod(bestAdjustment);
+        }
+
+        if(bestScore > SYNC_OPTIMIZED_THRESHOLD)
+        {
+            updateEqualizer(pattern);
+        }
+
+        return bestScore > SYNC_EQUALIZED_THRESHOLD;
+    }
+
+    /**
+     * Resets the observed samples per symbol to the nominal value.
+     */
+    private void resetSymbolPeriod()
+    {
+        mObservedSamplesPerSymbol = mSamplesPerSymbol;
+    }
+
+    /**
+     * Updates the observed samples per symbol (symbol period) from the timing correction measured at a sync, relative
+     * to the quantity of symbols since the previous timing update.  Constrained to the allowable deviation from the
+     * nominal samples per symbol.
+     * @param timingCorrection in samples that was applied at the current sync
+     */
+    private void updateSymbolPeriod(double timingCorrection)
+    {
+        if(mSymbolsSinceTimingUpdate > 0 && mSymbolsSinceTimingUpdate <= 1000)
+        {
+            mObservedSamplesPerSymbol += HANDHELD_SYMBOL_PERIOD_LOOP_GAIN * timingCorrection / mSymbolsSinceTimingUpdate;
+            double maximum = mSamplesPerSymbol * (1.0 + SAMPLES_PER_SYMBOL_ALLOWABLE_DEVIATION);
+            double minimum = mSamplesPerSymbol * (1.0 - SAMPLES_PER_SYMBOL_ALLOWABLE_DEVIATION);
+            mObservedSamplesPerSymbol = Math.max(minimum, Math.min(maximum, mObservedSamplesPerSymbol));
+        }
+    }
+
+    /**
      * Performs fine-grained symbol timing optimization of +/- .4% of the samples per symbol as needed.
      * @param pattern that was detected
      * @return true if detection score exceeds the optimized and equalized threshold for a quality sync detect.
      */
     private boolean optimizeFine(DMRSyncPattern pattern)
     {
+        if(isHandheldTransmission(pattern))
+        {
+            return optimizeFineHandheld(pattern);
+        }
+
+        resetSymbolPeriod();
+
         //Offset is the sample for the last symbol of the detected sync pattern.
         double offset = mBufferPointer + mSamplePoint;
         float currentScore = score(offset, mObservedSamplesPerSymbol, pattern);

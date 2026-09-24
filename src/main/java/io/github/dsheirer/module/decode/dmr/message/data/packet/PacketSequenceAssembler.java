@@ -39,6 +39,7 @@ public class PacketSequenceAssembler
     private PacketSequence mTimeslot1Sequence;
     private PacketSequence mTimeslot2Sequence;
     private static final int MAX_TRACKED_RADIOS = 1000;
+    private static final int UDT_FORMAT_NMEA_LOCATION = 5;
     //Most recent UDT format successfully received from each source radio, used to recover sequences with a lost header
     private final Map<Integer,Integer> mUdtFormatBySource = new HashMap<>();
 
@@ -175,8 +176,8 @@ public class PacketSequenceAssembler
 
     /**
      * Attempts to recover a single block UDT short data message (e.g. a GPS report) whose header was lost to bit
-     * errors.  Requires a CRC valid data preamble for the source/target addresses, a previously received UDT format
-     * from the same source radio, and a payload that passes the UDT CRC check.
+     * errors.  Requires a CRC valid data preamble for the source/target addresses and a payload that passes the UDT
+     * CRC check.  The UDT format is taken from the source radio's previous report, or NMEA location when unknown.
      * @return recovered message or null
      */
     private IMessage recoverHeaderlessUdt(PacketSequence sequence)
@@ -194,11 +195,14 @@ public class PacketSequenceAssembler
             return null;
         }
 
+        //Use the source radio's previously received UDT format.  When none is known yet (e.g. the first report after
+        //startup), assume NMEA location coded - the recovered message is still only accepted when the payload CRC
+        //and the NMEA location range checks both pass.
         Integer format = mUdtFormatBySource.get(preamble.getSourceAddress().getValue());
 
         if(format == null)
         {
-            return null;
+            format = UDT_FORMAT_NMEA_LOCATION;
         }
 
         DataBlock block = sequence.getDataBlocks().get(0);
