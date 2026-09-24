@@ -222,6 +222,18 @@ public class PacketSequenceAssembler
     }
 
     /**
+     * Indicates if the packet sequence for the timeslot has a header and is still waiting for announced data blocks.
+     * @param timeslot to check
+     * @return true if more data blocks are expected
+     */
+    public boolean isExpectingDataBlocks(int timeslot)
+    {
+        PacketSequence sequence = (timeslot == 1 ? mTimeslot1Sequence : mTimeslot2Sequence);
+        return sequence != null && (sequence.hasPacketSequenceHeader() || sequence.hasUDTHeader()) &&
+                !sequence.isComplete();
+    }
+
+    /**
      * Dispatches any partially assembled packet sequences that contain data blocks.  Invoked when the transmission
      * has ended (sync loss) so that sequences are not held until an unrelated later transmission, which is important
      * for simplex/direct mode channels where there are no repeater idle messages to trigger dispatch.

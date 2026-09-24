@@ -72,19 +72,24 @@ public class PacketSequenceMessageFactory
 
                 if(packet != null)
                 {
-                    switch(primaryHeader.getServiceAccessPoint())
+                    IMessage message = switch(primaryHeader.getServiceAccessPoint())
                     {
-                        case IP_PACKET_DATA:
-                            return createIPPacketData(packetSequence, packet);
-                        case PROPRIETARY_DATA:
-                            return createProprietary(packetSequence, packet);
-                        case SHORT_DATA:
-                            return createDefinedShortData(packetSequence, packet);
-                        default:
-//                            mLog.info("Unknown Packet SAP: " + primaryHeader.getServiceAccessPoint() + " - returning unknown packet");
-                            return new DMRPacketMessage(packetSequence, new UnknownPacket(packet, 0), packet,
-                                    packetSequence.getTimeslot(), packetSequence.getPacketSequenceHeader().getTimestamp());
+                        case IP_PACKET_DATA -> createIPPacketData(packetSequence, packet);
+                        case PROPRIETARY_DATA -> createProprietary(packetSequence, packet);
+                        case SHORT_DATA -> createDefinedShortData(packetSequence, packet);
+                        default -> new DMRPacketMessage(packetSequence, new UnknownPacket(packet, 0), packet,
+                                packetSequence.getTimeslot(), packetSequence.getPacketSequenceHeader().getTimestamp());
+                    };
+
+                    //Unconfirmed packets carry a trailing CRC-32 - flag packets with missing blocks or a failed CRC so
+                    //that corrupted content (e.g. text messages, positions) isn't presented as valid.
+                    if(message instanceof DMRPacketMessage packetMessage && !primaryHeader.isConfirmedData() &&
+                            !packetSequence.hasProprietaryDataHeader())
+                    {
+                        packetMessage.setValid(packetSequence.isComplete() && isUnconfirmedPacketCrcValid(packet));
                     }
+
+                    return message;
                 }
             }
             else if(packetSequence.hasUDTHeader() && packetSequence.hasDataBlocks())
@@ -99,6 +104,47 @@ public class PacketSequenceMessageFactory
         }
 
         return null;
+    }
+
+    /**
+     * Validates the CRC-32 of an unconfirmed data packet.  The final 32 bits of the last data block carry a CRC-32
+     * (polynomial 0x04C11DB7, initial value 0, not reflected) calculated over all preceding packet octets (including
+     * pad octets) with each pair of octets swapped, transmitted least significant octet first.
+     * @param packet containing the reassembled unconfirmed data blocks
+     * @return true if the CRC is valid
+     */
+    public static boolean isUnconfirmedPacketCrcValid(CorrectedBinaryMessage packet)
+    {
+        if(packet == null || packet.size() < 64 || packet.size() % 16 != 0)
+        {
+            return false;
+        }
+
+        int octets = packet.size() / 8;
+        int dataOctets = octets - 4;
+        int crc = 0;
+
+        for(int x = 0; x < dataOctets; x++)
+        {
+            //Octets are processed in swapped pairs
+            int index = (x % 2 == 0) ? x + 1 : x - 1;
+            int value = packet.getByte(index * 8) & 0xFF;
+            crc ^= value << 24;
+
+            for(int bit = 0; bit < 8; bit++)
+            {
+                crc = (crc & 0x80000000) != 0 ? (crc << 1) ^ 0x04C11DB7 : crc << 1;
+            }
+        }
+
+        int received = 0;
+
+        for(int x = 0; x < 4; x++)
+        {
+            received |= (packet.getByte((dataOctets + x) * 8) & 0xFF) << (8 * x);
+        }
+
+        return crc == received;
     }
 
     /**

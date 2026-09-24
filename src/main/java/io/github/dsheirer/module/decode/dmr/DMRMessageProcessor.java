@@ -29,7 +29,10 @@ import io.github.dsheirer.module.decode.dmr.message.CACH;
 import io.github.dsheirer.module.decode.dmr.message.DMRBurst;
 import io.github.dsheirer.module.decode.dmr.message.data.DataMessageWithLinkControl;
 import io.github.dsheirer.module.decode.dmr.message.data.IDLEMessage;
+import io.github.dsheirer.module.decode.dmr.message.data.DataMessage;
 import io.github.dsheirer.module.decode.dmr.message.data.block.DataBlock;
+import io.github.dsheirer.module.decode.dmr.message.data.block.DataBlock1_2Rate;
+import io.github.dsheirer.module.decode.dmr.message.type.DataType;
 import io.github.dsheirer.module.decode.dmr.message.data.csbk.CSBKMessage;
 import io.github.dsheirer.module.decode.dmr.message.data.csbk.standard.Aloha;
 import io.github.dsheirer.module.decode.dmr.message.data.csbk.standard.Preamble;
@@ -239,7 +242,13 @@ public class DMRMessageProcessor implements Listener<IMessage>
             }
 
             //Packet Sequence Message Assembly ...
-            if(message instanceof Preamble preamble)
+            DataBlock recoveredBlock = recoverMisclassifiedDataBlock(message);
+
+            if(recoveredBlock != null)
+            {
+                mPacketSequenceAssembler.process(recoveredBlock);
+            }
+            else if(message instanceof Preamble preamble)
             {
                 mPacketSequenceAssembler.process(preamble);
             }
@@ -277,6 +286,42 @@ public class DMRMessageProcessor implements Listener<IMessage>
         {
             dispatch(mTalkerAliasAssembler.process(flc));
         }
+    }
+
+    /**
+     * Recovers a rate 1/2 data block whose slot type (data type) was corrupted by bit errors.  When a packet sequence
+     * is still waiting for announced data blocks, a burst that failed its own CRC check but whose BPTC(196,96)
+     * payload decoded successfully is treated as the next data block.  The packet's CRC-32 then validates whether the
+     * reassembled packet is correct.
+     * @param message to evaluate
+     * @return recovered data block or null
+     */
+    private DataBlock recoverMisclassifiedDataBlock(IMessage message)
+    {
+        if(message instanceof DataMessage dataMessage && !(message instanceof DataBlock) && !message.isValid() &&
+                isBPTCDataType(dataMessage.getSlotType().getDataType()) && dataMessage.getMessage() != null &&
+                dataMessage.getMessage().size() >= 96 && dataMessage.getMessage().getCorrectedBitCount() >= 0 &&
+                mPacketSequenceAssembler.isExpectingDataBlocks(message.getTimeslot()))
+        {
+            return new DataBlock1_2Rate(dataMessage.getSyncPattern(), dataMessage.getMessage().getSubMessage(0, 96),
+                    dataMessage.getCACH(), dataMessage.getSlotType(), dataMessage.getTimestamp(),
+                    dataMessage.getTimeslot());
+        }
+
+        return null;
+    }
+
+    /**
+     * Indicates if the data type uses BPTC(196,96) encoding, the same as rate 1/2 data blocks.
+     */
+    private static boolean isBPTCDataType(DataType dataType)
+    {
+        return switch(dataType)
+        {
+            case PI_HEADER, VOICE_HEADER, TLC, CSBK, MBC_HEADER, MBC_BLOCK, DATA_HEADER, SLOT_IDLE, USB_DATA,
+                 MBC_ENC_HEADER, DATA_ENC_HEADER, CHANNEL_CONTROL_ENC_HEADER -> true;
+            default -> false;
+        };
     }
 
     /**
