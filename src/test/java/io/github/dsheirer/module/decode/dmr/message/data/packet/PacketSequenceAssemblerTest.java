@@ -24,6 +24,7 @@ import io.github.dsheirer.message.IMessage;
 import io.github.dsheirer.module.decode.dmr.message.CACH;
 import io.github.dsheirer.module.decode.dmr.message.data.SlotType;
 import io.github.dsheirer.module.decode.dmr.message.data.block.DataBlock1_2Rate;
+import io.github.dsheirer.module.decode.dmr.message.data.csbk.standard.Preamble;
 import io.github.dsheirer.module.decode.dmr.message.data.header.UDTHeader;
 import io.github.dsheirer.module.decode.dmr.sync.DMRSyncPattern;
 import java.util.ArrayList;
@@ -45,11 +46,16 @@ public class PacketSequenceAssemblerTest
 
     private static UDTHeader udtHeader(int blocks, long timestamp)
     {
+        return udtHeader(blocks, timestamp, SOURCE, DESTINATION);
+    }
+
+    private static UDTHeader udtHeader(int blocks, long timestamp, int source, int destination)
+    {
         CorrectedBinaryMessage message = new CorrectedBinaryMessage(96);
         message.load(3, 1, 0);           //UDT format high bit
         message.load(12, 4, 5);          //UDT format 5 = NMEA location coded
-        message.load(16, 24, DESTINATION);
-        message.load(40, 24, SOURCE);
+        message.load(16, 24, destination);
+        message.load(40, 24, source);
         message.load(70, 2, blocks - 1); //UAB = appended blocks - 1
         CorrectedBinaryMessage slotTypeMessage = new CorrectedBinaryMessage(24);
         return new UDTHeader(DMRSyncPattern.DIRECT_DATA_TIMESLOT_1, message, CACH.getCACH(new CorrectedBinaryMessage(288)),
@@ -131,6 +137,92 @@ public class PacketSequenceAssemblerTest
             assertFalse(sms.isCrcValid(), "CRC should fail for corrupted block " + hex);
             assertTrue(sms.getSMS().contains("CRC ERROR"));
         }
+    }
+
+    private static CorrectedBinaryMessage hex(String hex)
+    {
+        CorrectedBinaryMessage message = new CorrectedBinaryMessage(hex.length() * 4);
+
+        for(int x = 0; x < hex.length() / 2; x++)
+        {
+            message.load(x * 8, 8, Integer.parseInt(hex.substring(x * 2, x * 2 + 2), 16));
+        }
+
+        return message;
+    }
+
+    private static DataBlock1_2Rate capturedBlock(String hexBlock, long timestamp)
+    {
+        return new DataBlock1_2Rate(DMRSyncPattern.DIRECT_DATA_TIMESLOT_1, hex(hexBlock),
+                CACH.getCACH(new CorrectedBinaryMessage(288)), new SlotType(new CorrectedBinaryMessage(24)), timestamp, 1);
+    }
+
+    /**
+     * CSBK data preamble captured from the Ailunce HD2: FM:908 TO:2345.
+     */
+    private static Preamble capturedPreamble(long timestamp)
+    {
+        Preamble preamble = new Preamble(DMRSyncPattern.DIRECT_DATA_TIMESLOT_1, hex("BD00801F00092900038CB2CF"),
+                CACH.getCACH(new CorrectedBinaryMessage(288)), new SlotType(new CorrectedBinaryMessage(24)), timestamp, 1);
+        preamble.checkCRC();
+        return preamble;
+    }
+
+    @Test
+    void recoversReportWhenHeaderBlockCountCorrupted()
+    {
+        //18:40:00 - header CRC error decoded 2 appended blocks, but only 1 (intact) block was transmitted
+        UDTShortMessageService sms = new UDTShortMessageService(udtHeader(2, 1000, 908, 2345),
+                hex("500CCC0F7808B402C0836B9F"));
+        assertTrue(sms.isCrcValid(), "CRC should validate against the single received block");
+        assertTrue(sms.getNmeaLocation().isValid());
+        assertEquals(51.2016, sms.getNmeaLocation().getLatitude(), 0.0001);
+        assertEquals(-2.1902, sms.getNmeaLocation().getLongitude(), 0.0001);
+    }
+
+    @Test
+    void recoversReportWhenHeaderLost()
+    {
+        List<IMessage> dispatched = new ArrayList<>();
+        PacketSequenceAssembler assembler = new PacketSequenceAssembler();
+        assembler.setMessageListener(dispatched::add);
+
+        //A good report from radio 908 teaches the assembler that radio's UDT format
+        assembler.process(capturedPreamble(900));
+        assembler.process(udtHeader(1, 1000, 908, 2345));
+        assembler.process(capturedBlock("500CCC0F2808B4010087148B", 1060));
+        assertEquals(1, dispatched.size());
+
+        //18:41:00 - preambles OK, header lost to bit errors, intact data block
+        assertTrue(capturedPreamble(30000).isValid(), "Captured preamble should pass its CRC");
+        assembler.process(capturedPreamble(30000));
+        assembler.process(capturedBlock("500CCC0F6408B4054080D493", 31000));
+        assembler.dispatchPendingSequences(); //end of transmission
+
+        assertEquals(2, dispatched.size(), "Report with a lost header should be recovered");
+        UDTShortMessageService sms = (UDTShortMessageService)dispatched.get(1);
+        assertTrue(sms.isHeaderRecovered());
+        assertTrue(sms.isHeaderValid(), "IDs come from a CRC valid preamble");
+        assertEquals(908, sms.getSourceId());
+        assertEquals(51.2016, sms.getNmeaLocation().getLatitude(), 0.0001);
+    }
+
+    @Test
+    void doesNotRecoverCorruptedHeaderlessBlock()
+    {
+        List<IMessage> dispatched = new ArrayList<>();
+        PacketSequenceAssembler assembler = new PacketSequenceAssembler();
+        assembler.setMessageListener(dispatched::add);
+
+        assembler.process(capturedPreamble(900));
+        assembler.process(udtHeader(1, 1000, 908, 2345));
+        assembler.process(capturedBlock("500CCC0F2808B4010087148B", 1060));
+
+        //Corrupted block (fails CRC) with no header must not be turned into a report
+        assembler.process(capturedPreamble(30000));
+        assembler.process(capturedBlock("500CCC0F3C09B40240820C97", 31000));
+        assembler.dispatchPendingSequences();
+        assertEquals(1, dispatched.size());
     }
 
     @Test

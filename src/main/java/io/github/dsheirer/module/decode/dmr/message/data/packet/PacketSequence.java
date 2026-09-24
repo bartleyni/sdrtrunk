@@ -151,6 +151,14 @@ public class PacketSequence
 
 
     /**
+     * Preambles received for this packet sequence
+     */
+    public List<Preamble> getPreambles()
+    {
+        return mPreambles;
+    }
+
+    /**
      * Adds a preamble to this packet sequence
      */
     public void addPreamble(Preamble preamble)

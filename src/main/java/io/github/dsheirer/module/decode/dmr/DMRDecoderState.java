@@ -418,7 +418,8 @@ public class DMRDecoderState extends TimeslotDecoderState
             PlottableDecodeEvent.PlottableDecodeEventBuilder builder = PlottableDecodeEvent
                     .plottableBuilder(DecodeEventType.GPS, sms.getTimestamp())
                     .channel(getCurrentChannel())
-                    .details(location.toString() + (sms.isHeaderValid() ? "" : " [HEADER CRC ERROR - IDS UNVERIFIED]"))
+                    .details(location.toString() + (sms.isHeaderRecovered() ? " [HEADER RECOVERED]" : "") +
+                            (sms.isHeaderValid() ? "" : " [HEADER CRC ERROR - IDS UNVERIFIED]"))
                     .identifiers(mic)
                     .protocol(Protocol.DMR)
                     .location(location.getPosition())

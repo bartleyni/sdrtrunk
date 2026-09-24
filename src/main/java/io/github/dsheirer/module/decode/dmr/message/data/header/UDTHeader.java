@@ -27,6 +27,7 @@ import io.github.dsheirer.module.decode.dmr.identifier.DMRRadio;
 import io.github.dsheirer.module.decode.dmr.identifier.DMRTalkgroup;
 import io.github.dsheirer.module.decode.dmr.message.CACH;
 import io.github.dsheirer.module.decode.dmr.message.data.SlotType;
+import io.github.dsheirer.module.decode.dmr.message.data.csbk.standard.Preamble;
 import io.github.dsheirer.module.decode.dmr.message.data.csbk.Opcode;
 import io.github.dsheirer.module.decode.dmr.message.type.ServiceAccessPoint;
 import io.github.dsheirer.module.decode.dmr.message.type.UnifiedDataTransportFormat;
@@ -182,6 +183,36 @@ public class UDTHeader extends DataHeader
     public Opcode getOpcode()
     {
         return getOpcode(getMessage());
+    }
+
+    /**
+     * Raw UDT format field value
+     */
+    public int getFormatValue()
+    {
+        return getMessage().getInt(UDT_FORMAT);
+    }
+
+    /**
+     * Creates a substitute UDT header for a short data sequence whose actual header was lost to bit errors, using the
+     * source and target addresses from a (CRC valid) preamble of the same sequence and a known UDT format.  The
+     * substitute header is marked invalid since it wasn't received over the air.
+     * @param preamble from the same packet sequence
+     * @param formatValue raw UDT format value
+     * @param timestamp for the header
+     * @return substitute header
+     */
+    public static UDTHeader createSubstitute(Preamble preamble, int formatValue, long timestamp)
+    {
+        CorrectedBinaryMessage message = new CorrectedBinaryMessage(96);
+        message.set(RADIO_TALKGROUP_FLAG, preamble.isTalkgroupTargetAddress());
+        message.setInt(formatValue, UDT_FORMAT);
+        message.setInt(preamble.getTargetAddress().getValue(), DESTINATION_IDENTIFIER);
+        message.setInt(preamble.getSourceAddress().getValue(), SOURCE_RADIO);
+        UDTHeader header = new UDTHeader(preamble.getSyncPattern(), message, preamble.getCACH(), preamble.getSlotType(),
+                timestamp, preamble.getTimeslot());
+        header.setValid(false);
+        return header;
     }
 
     /**

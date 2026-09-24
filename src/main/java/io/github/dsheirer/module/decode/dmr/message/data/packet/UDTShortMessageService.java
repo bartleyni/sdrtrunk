@@ -39,6 +39,9 @@ public class UDTShortMessageService extends DMRMessage
     private String mSMS;
     private UDTNmeaLocation mNmeaLocation;
     private Boolean mCrcValid;
+    private int mValidatedBlockCount;
+    private boolean mIdsVerifiedByPreamble = false;
+    private boolean mHeaderRecovered = false;
     private static final int UDT_BLOCK_LENGTH = 96;
     private static final int CRC_LENGTH = 16;
     private static final int CRC_CCITT_POLYNOMIAL = 0x1021;
@@ -68,7 +71,11 @@ public class UDTShortMessageService extends DMRMessage
         sb.append("CC:").append(mHeader.getSlotType().getColorCode());
         sb.append(" SMS MESSAGE:").append(getSMS());
 
-        if(!isHeaderValid())
+        if(isHeaderRecovered())
+        {
+            sb.append(" [HEADER RECOVERED]");
+        }
+        else if(!isHeaderValid())
         {
             sb.append(" [HEADER CRC ERROR]");
         }
@@ -140,9 +147,41 @@ public class UDTShortMessageService extends DMRMessage
     private boolean checkCrc()
     {
         CorrectedBinaryMessage payload = getMessage();
-        int length = mHeader.getAppendedBlockCount() * UDT_BLOCK_LENGTH;
 
-        if(payload == null || payload.size() < length)
+        if(payload == null)
+        {
+            return false;
+        }
+
+        int claimedBlocks = mHeader.getAppendedBlockCount();
+
+        if(checkCrc(payload, claimedBlocks))
+        {
+            mValidatedBlockCount = claimedBlocks;
+            return true;
+        }
+
+        //The header's appended block count may have been corrupted (e.g. header CRC error) - validate against the
+        //quantity of blocks that were actually received.  The payload CRC still protects the content.
+        int receivedBlocks = payload.size() / UDT_BLOCK_LENGTH;
+
+        if(receivedBlocks >= 1 && receivedBlocks != claimedBlocks && checkCrc(payload, receivedBlocks))
+        {
+            mValidatedBlockCount = receivedBlocks;
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Checks the payload CRC assuming the specified quantity of appended blocks.
+     */
+    private static boolean checkCrc(CorrectedBinaryMessage payload, int blocks)
+    {
+        int length = blocks * UDT_BLOCK_LENGTH;
+
+        if(blocks < 1 || payload.size() < length)
         {
             return false;
         }
@@ -170,7 +209,48 @@ public class UDTShortMessageService extends DMRMessage
      */
     public boolean isHeaderValid()
     {
-        return mHeader.isValid();
+        return mHeader.isValid() || mIdsVerifiedByPreamble;
+    }
+
+    /**
+     * Marks the source and destination IDs as verified by a CRC valid preamble from the same packet sequence.
+     */
+    public void setIdsVerifiedByPreamble(boolean verified)
+    {
+        mIdsVerifiedByPreamble = verified;
+    }
+
+    /**
+     * Indicates that the original UDT header was lost and this message was reconstructed from the packet sequence's
+     * preamble and the source radio's previously used UDT format.
+     */
+    public boolean isHeaderRecovered()
+    {
+        return mHeaderRecovered;
+    }
+
+    /**
+     * Sets the header recovered flag.
+     */
+    public void setHeaderRecovered(boolean recovered)
+    {
+        mHeaderRecovered = recovered;
+    }
+
+    /**
+     * Source radio ID from the header
+     */
+    public int getSourceId()
+    {
+        return mHeader.getSourceLLID().getValue();
+    }
+
+    /**
+     * Raw UDT format value from the header
+     */
+    public int getFormatValue()
+    {
+        return mHeader.getFormatValue();
     }
 
     /**
@@ -188,7 +268,15 @@ public class UDTShortMessageService extends DMRMessage
     {
         if(mNmeaLocation == null)
         {
-            mNmeaLocation = new UDTNmeaLocation(getMessage());
+            //Limit the payload to the CRC validated block count so that short/long format detection is correct
+            if(isCrcValid() && getMessage().size() > mValidatedBlockCount * UDT_BLOCK_LENGTH)
+            {
+                mNmeaLocation = new UDTNmeaLocation(getMessage().getSubMessage(0, mValidatedBlockCount * UDT_BLOCK_LENGTH));
+            }
+            else
+            {
+                mNmeaLocation = new UDTNmeaLocation(getMessage());
+            }
         }
 
         return mNmeaLocation;
