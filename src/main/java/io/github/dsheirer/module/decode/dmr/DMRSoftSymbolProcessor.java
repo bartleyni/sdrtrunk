@@ -144,7 +144,7 @@ public class DMRSoftSymbolProcessor
     /**
      * Sets simplex (direct mode / talkaround) channel mode where every transmission originates from a handheld or
      * mobile radio, regardless of the sync pattern the radio transmits.  Each new transmission fully re-acquires the
-     * carrier offset and the measured offsets are not used for channel/tuner frequency correction.
+     * carrier offset.
      * @param enabled true for simplex channels.
      */
     public void setSimplexMode(boolean enabled)
@@ -636,12 +636,11 @@ public class DMRSoftSymbolProcessor
         mEqualizerBalance = Math.min(mEqualizerBalance, MAXIMUM_EQUALIZER_BALANCE);
         mEqualizerBalance = Math.max(mEqualizerBalance, -MAXIMUM_EQUALIZER_BALANCE);
 
-        //Only base station syncs drive channel/tuner frequency correction.  Mobile and direct mode radios each have
-        //their own carrier offset and would otherwise skew the tuner auto-PPM for all channels on the tuner.
-        if(!isHandheldTransmission(pattern))
-        {
-            mFeedbackDecoder.processPLLError(mEqualizerBalance);
-        }
+        //All syncs, including mobile/direct mode, drive channel and tuner (auto-PPM) frequency correction.  The tuner's
+        //own error (often several kHz on uncorrected RTL-SDR dongles) is far larger than the offset between handheld
+        //radios, and on a simplex-only setup these syncs are the only means of correcting it.  Differences between
+        //individual radios are handled by the per-transmission equalizer re-acquisition.
+        mFeedbackDecoder.processPLLError(mEqualizerBalance);
 
         //Constrain gain between 1.0f and 1.35f
         mEqualizerGain = Math.min(mEqualizerGain, MAXIMUM_EQUALIZER_GAIN);
