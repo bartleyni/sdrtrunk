@@ -30,7 +30,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * User preferences for publishing decoded DMR GPS/APRS position reports and emergency alarms to an MQTT broker.
+ * User preferences for publishing decoded DMR GPS/APRS position reports, emergency alarms and text messages to an
+ * MQTT broker.
  */
 public class MqttPreference extends Preference
 {
@@ -39,6 +40,7 @@ public class MqttPreference extends Preference
     public static final String DEFAULT_CLIENT_ID = "sdrtrunk";
     public static final String DEFAULT_TOPIC = "sdrtrunk/dmr/gps";
     public static final String DEFAULT_ALARM_TOPIC = "sdrtrunk/dmr/alarm";
+    public static final String DEFAULT_TEXT_TOPIC = "sdrtrunk/dmr/text";
     private static final String ENABLED = "mqtt.enabled";
     private static final String SERVER = "mqtt.server";
     private static final String CLIENT_ID = "mqtt.client.id";
@@ -48,6 +50,8 @@ public class MqttPreference extends Preference
     private static final String DESTINATION_ID_FILTER = "mqtt.destination.id.filter";
     private static final String ALARM_ENABLED = "mqtt.alarm.enabled";
     private static final String ALARM_TOPIC = "mqtt.alarm.topic";
+    private static final String TEXT_ENABLED = "mqtt.text.enabled";
+    private static final String TEXT_TOPIC = "mqtt.text.topic";
 
     private Preferences mPreferences = Preferences.userNodeForPackage(MqttPreference.class);
 
@@ -131,6 +135,22 @@ public class MqttPreference extends Preference
     }
 
     /**
+     * Indicates if DMR text messages (SMS) are published (to the text topic)
+     */
+    public boolean isTextEnabled()
+    {
+        return mPreferences.getBoolean(TEXT_ENABLED, true);
+    }
+
+    /**
+     * MQTT topic to publish DMR text messages to
+     */
+    public String getTextTopic()
+    {
+        return mPreferences.get(TEXT_TOPIC, DEFAULT_TEXT_TOPIC);
+    }
+
+    /**
      * Destination (TO) ID filter as entered by the user: a comma separated list of radio or talkgroup IDs.  An empty
      * filter publishes position reports sent to any destination.
      */
@@ -181,7 +201,8 @@ public class MqttPreference extends Preference
      * Updates and stores all MQTT settings and notifies listeners once.
      */
     public void update(boolean enabled, String server, String clientId, String userName, String password,
-                       String topic, String destinationIdFilter, boolean alarmEnabled, String alarmTopic)
+                       String topic, String destinationIdFilter, boolean alarmEnabled, String alarmTopic,
+                       boolean textEnabled, String textTopic)
     {
         mPreferences.putBoolean(ENABLED, enabled);
         mPreferences.put(SERVER, clean(server, DEFAULT_SERVER));
@@ -192,6 +213,8 @@ public class MqttPreference extends Preference
         mPreferences.put(DESTINATION_ID_FILTER, clean(destinationIdFilter, ""));
         mPreferences.putBoolean(ALARM_ENABLED, alarmEnabled);
         mPreferences.put(ALARM_TOPIC, clean(alarmTopic, DEFAULT_ALARM_TOPIC));
+        mPreferences.putBoolean(TEXT_ENABLED, textEnabled);
+        mPreferences.put(TEXT_TOPIC, clean(textTopic, DEFAULT_TEXT_TOPIC));
         notifyPreferenceUpdated();
     }
 

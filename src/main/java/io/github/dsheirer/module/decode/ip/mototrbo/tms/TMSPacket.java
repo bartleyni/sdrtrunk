@@ -54,11 +54,118 @@ public class TMSPacket extends Packet
 
     /**
      * Extracts the text message payload.
+     *
+     * Supports two TMS layouts:
+     * 1. Binary TMS header: 16-bit length (count of bytes that follow), a header byte (bit 5 = extension), an
+     *    address length byte and optional address, then extension bytes (bit 7 = another extension byte follows),
+     *    followed by UTF-16LE text.  Used by Motorola and compatible radios (e.g. Ailunce HD1/HD2).
+     * 2. Legacy layout: 4 ASCII digit characters followed by UTF-16LE text.
      */
     public String getTextMessage()
     {
+        String binaryHeaderText = getBinaryHeaderTextMessage();
+
+        if(binaryHeaderText != null)
+        {
+            return binaryHeaderText;
+        }
+
+        return getLegacyTextMessage();
+    }
+
+    /**
+     * Parses the text using the binary TMS header layout.
+     * @return text or null if the payload doesn't conform to the binary header layout.
+     */
+    private String getBinaryHeaderTextMessage()
+    {
+        int available = (getMessage().size() - getOffset()) / 8;
+
+        if(available < 4)
+        {
+            return null;
+        }
+
+        int length = ((getByte(0) & 0xFF) << 8) | (getByte(1) & 0xFF);
+        int end = 2 + length;
+
+        //Legacy layout starts with ASCII digits, which produce an implausibly large binary length
+        if(length < 2 || end > available)
+        {
+            return null;
+        }
+
+        int pointer = 2;
+        int header = getByte(pointer++) & 0xFF;
+
+        if((header & 0x20) != 0) //Extension - address and extension bytes follow
+        {
+            int addressLength = getByte(pointer++) & 0xFF;
+            pointer += addressLength;
+
+            //Header extension bytes: continue while bit 7 is set
+            int extension;
+            do
+            {
+                if(pointer >= end)
+                {
+                    return null;
+                }
+
+                extension = getByte(pointer++) & 0xFF;
+            }
+            while((extension & 0x80) != 0);
+        }
+
+        int textLength = end - pointer;
+
+        if(textLength <= 0 || (textLength % 2) != 0)
+        {
+            return null;
+        }
+
+        byte[] text = new byte[textLength];
+
+        for(int x = 0; x < textLength; x++)
+        {
+            text[x] = getByte(pointer + x);
+        }
+
+        return clean(new String(text, StandardCharsets.UTF_16LE));
+    }
+
+    /**
+     * Byte at the specified byte index relative to the packet offset.
+     */
+    private byte getByte(int index)
+    {
+        return getMessage().getByte(getOffset() + (index * 8));
+    }
+
+    /**
+     * Removes leading/trailing line breaks and control characters that radios prepend to message text.
+     */
+    private static String clean(String text)
+    {
+        return text.replaceAll("^[\\r\\n\\u0000]+|[\\r\\n\\u0000]+$", "");
+    }
+
+    /**
+     * Parses the text using the legacy layout (4 ASCII digits followed by UTF-16LE text).
+     */
+    private String getLegacyTextMessage()
+    {
         //Payload starts at packet offset, after 32-bit header
         int byteCount = (getMessage().length() - getOffset() - 32) / 8;
+
+        //Use the header's character count when it is plausible, so that trailing bytes (e.g. packet CRC) are
+        //excluded and a trailing zero byte of the final character isn't truncated.
+        int characterCount = getHeader().getCharacterCount();
+
+        if(characterCount > 0 && (32 + characterCount * 16) <= (getMessage().size() - getOffset()))
+        {
+            byteCount = characterCount * 2;
+        }
 
         if(byteCount > 0)
         {

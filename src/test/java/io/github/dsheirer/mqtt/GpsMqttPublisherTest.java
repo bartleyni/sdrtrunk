@@ -62,11 +62,13 @@ public class GpsMqttPublisherTest
 {
     private static final String TOPIC = "test/dmr/gps";
     private static final String ALARM_TOPIC = "test/dmr/alarm";
+    private static final String TEXT_TOPIC = "test/dmr/text";
     private Server mBroker;
     private String mServerUri;
     private MqttClient mSubscriber;
     private final BlockingQueue<String> mReceived = new LinkedBlockingQueue<>();
     private final BlockingQueue<String> mReceivedAlarms = new LinkedBlockingQueue<>();
+    private final BlockingQueue<String> mReceivedTexts = new LinkedBlockingQueue<>();
 
     /**
      * Preference stub that doesn't touch the user's stored preferences.
@@ -90,6 +92,8 @@ public class GpsMqttPublisherTest
         @Override public Set<Integer> getDestinationIdFilter() {return mDestinationIds;}
         @Override public boolean isAlarmEnabled() {return true;}
         @Override public String getAlarmTopic() {return ALARM_TOPIC;}
+        @Override public boolean isTextEnabled() {return true;}
+        @Override public String getTextTopic() {return TEXT_TOPIC;}
     }
 
     @BeforeEach
@@ -115,6 +119,8 @@ public class GpsMqttPublisherTest
                 mReceived.add(new String(message.getPayload(), StandardCharsets.UTF_8)));
         mSubscriber.subscribe(ALARM_TOPIC, 1, (topic, message) ->
                 mReceivedAlarms.add(new String(message.getPayload(), StandardCharsets.UTF_8)));
+        mSubscriber.subscribe(TEXT_TOPIC, 1, (topic, message) ->
+                mReceivedTexts.add(new String(message.getPayload(), StandardCharsets.UTF_8)));
     }
 
     @AfterEach
@@ -315,6 +321,49 @@ public class GpsMqttPublisherTest
         {
             publisher.stop();
         }
+    }
+
+    @Test
+    void publishesTextMessages() throws Exception
+    {
+        //Destination filter doesn't match - text messages are still published to the text topic
+        GpsMqttPublisher publisher = new GpsMqttPublisher(new TestPreference(Set.of(5057)));
+
+        try
+        {
+            DecodeEvent text = DMRDecodeEvent.builder(DecodeEventType.TEXT_MESSAGE, 1700000000000L)
+                    .identifiers(new IdentifierCollection(List.of(DMRRadio.createFrom(908), DMRRadio.createTo(2345))))
+                    .details("TEXT MESSAGE: !ad")
+                    .build();
+            publisher.receive(text);
+
+            String payload = mReceivedTexts.poll(10, TimeUnit.SECONDS);
+            assertNotNull(payload, "No MQTT text message received");
+            JsonObject json = JsonParser.parseString(payload).getAsJsonObject();
+            assertEquals("!ad", json.get("text").getAsString());
+            assertEquals(908, json.get("from").getAsInt());
+            assertEquals(2345, json.get("to").getAsInt());
+            assertNull(mReceived.poll(500, TimeUnit.MILLISECONDS), "Text was published to the position topic");
+
+            //Failed NMEA position reports are GPS events, not text messages
+            publisher.receive(DMRDecodeEvent.builder(DecodeEventType.GPS, 1700000001000L)
+                    .details("MESSAGE: NMEA LOCATION (CRC ERROR)").build());
+            assertNull(mReceivedTexts.poll(500, TimeUnit.MILLISECONDS), "Failed NMEA report published as text");
+        }
+        finally
+        {
+            publisher.stop();
+        }
+    }
+
+    @Test
+    void extractsText()
+    {
+        assertEquals("!ad", GpsMqttPublisher.extractText("TEXT MESSAGE: !ad"));
+        assertEquals("hello", GpsMqttPublisher.extractText("MESSAGE: hello"));
+        assertEquals("hi", GpsMqttPublisher.extractText("SMS:hi"));
+        assertEquals("SDRTRUNK TEST MESSAGE", JsonParser.parseString(GpsMqttPublisher.createTestText())
+                .getAsJsonObject().get("text").getAsString());
     }
 
     @Test

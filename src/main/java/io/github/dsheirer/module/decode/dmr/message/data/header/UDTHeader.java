@@ -104,8 +104,15 @@ public class UDTHeader extends DataHeader
         {
             sb.append(" OPCODE:").append(getOpcode());
         }
+        sb.append(" BLOCKS:").append(getAppendedBlockCount());
         sb.append(" PAD NIBBLES:").append(getPadNibbleCount());
         sb.append(" SAP:").append(getServiceAccessPoint());
+
+        if(!isValid())
+        {
+            sb.append(" MSG:").append(getMessage().toHexString());
+        }
+
         return sb.toString();
     }
 
@@ -141,6 +148,14 @@ public class UDTHeader extends DataHeader
     public int getPadNibbleCount()
     {
         return getMessage().getInt(PAD_NIBBLE);
+    }
+
+    /**
+     * Quantity of data blocks appended to this UDT header (1-4).  The UAB field value is the block count minus one.
+     */
+    public int getAppendedBlockCount()
+    {
+        return getMessage().getInt(UAB) + 1;
     }
 
     /**

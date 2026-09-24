@@ -62,7 +62,8 @@ import org.slf4j.LoggerFactory;
 /**
  * Publishes decoded DMR GPS position reports (DMR APRS via ETSI UDT NMEA or Motorola LRRP, and in-call GPS) to an
  * MQTT broker as JSON, optionally filtered by the destination (TO) radio or talkgroup ID.  DMR emergency alarms are
- * published to a separate alarm topic, with the alarming radio's last known position when available.
+ * published to a separate alarm topic, with the alarming radio's last known position when available, and DMR text
+ * messages are published to a separate text topic.
  *
  * Decode events are received on decoder threads, so publishing is handed to a single background thread with a
  * bounded queue.  When the broker is slow or unreachable, excess position reports are discarded rather than
@@ -95,7 +96,8 @@ public class GpsMqttPublisher implements Listener<IDecodeEvent>
      * Snapshot of the MQTT preference settings
      */
     private record Settings(boolean enabled, String server, String clientId, String userName, String password,
-                            String topic, Set<Integer> destinationIds, boolean alarmEnabled, String alarmTopic) {}
+                            String topic, Set<Integer> destinationIds, boolean alarmEnabled, String alarmTopic,
+                            boolean textEnabled, String textTopic) {}
 
     /**
      * Most recent position reported by a radio, included with any emergency alarm from that radio.
@@ -134,7 +136,8 @@ public class GpsMqttPublisher implements Listener<IDecodeEvent>
     {
         return new Settings(mPreference.isEnabled(), mPreference.getServer(), mPreference.getClientId(),
                 mPreference.getUserName(), mPreference.getPassword(), mPreference.getTopic(),
-                mPreference.getDestinationIdFilter(), mPreference.isAlarmEnabled(), mPreference.getAlarmTopic());
+                mPreference.getDestinationIdFilter(), mPreference.isAlarmEnabled(), mPreference.getAlarmTopic(),
+                mPreference.isTextEnabled(), mPreference.getTextTopic());
     }
 
     /**
@@ -179,6 +182,42 @@ public class GpsMqttPublisher implements Listener<IDecodeEvent>
                     mAliasModel);
             mExecutor.execute(() -> publish(settings, settings.alarmTopic(), json));
         }
+        //Text messages are not subject to the destination ID filter
+        else if(settings.textEnabled() && isDmrTextMessage(decodeEvent))
+        {
+            String json = toTextJson(decodeEvent, false, mAliasModel);
+            mExecutor.execute(() -> publish(settings, settings.textTopic(), json));
+        }
+    }
+
+    /**
+     * Indicates if the event is a DMR text message (ETSI UDT SMS, Motorola TMS or Hytera SMS).
+     */
+    private static boolean isDmrTextMessage(IDecodeEvent event)
+    {
+        return event.getProtocol() == Protocol.DMR && (event.getEventType() == DecodeEventType.SMS ||
+                event.getEventType() == DecodeEventType.TEXT_MESSAGE);
+    }
+
+    /**
+     * Extracts the message text from the event details by removing the decoder's descriptive prefix.
+     */
+    static String extractText(String details)
+    {
+        if(details == null)
+        {
+            return "";
+        }
+
+        for(String prefix: new String[]{"TEXT MESSAGE: ", "MESSAGE: ", "SMS:"})
+        {
+            if(details.startsWith(prefix))
+            {
+                return details.substring(prefix.length()).trim();
+            }
+        }
+
+        return details.trim();
     }
 
     /**
@@ -299,6 +338,64 @@ public class GpsMqttPublisher implements Listener<IDecodeEvent>
         event.setTimeslot(1);
 
         return toAlarmJson(event, new LastPosition(51.50073, -0.12463, now - 60000), true, null);
+    }
+
+    /**
+     * Creates an example DMR text message JSON payload, marked as a test message.
+     * @return JSON payload
+     */
+    public static String createTestText()
+    {
+        DecodeEvent event = DecodeEvent.builder(DecodeEventType.TEXT_MESSAGE, System.currentTimeMillis())
+                .protocol(Protocol.DMR)
+                .identifiers(new IdentifierCollection(List.of(DMRRadio.createFrom(TEST_SOURCE_ID),
+                        DMRRadio.createTo(TEST_DESTINATION_ID))))
+                .details("TEXT MESSAGE: SDRTRUNK TEST MESSAGE")
+                .build();
+        event.setTimeslot(1);
+        return toTextJson(event, true, null);
+    }
+
+    /**
+     * Creates the JSON payload for a text message.
+     * @param event text message event
+     * @param test true to mark the payload as a test message
+     * @param aliasModel to resolve aliases, or null
+     */
+    private static String toTextJson(IDecodeEvent event, boolean test, AliasModel aliasModel)
+    {
+        JsonObject json = new JsonObject();
+
+        if(test)
+        {
+            json.addProperty("test", true);
+        }
+
+        json.addProperty("timestamp", Instant.ofEpochMilli(event.getTimeStart()).toString());
+        json.addProperty("epoch_ms", event.getTimeStart());
+        json.addProperty("protocol", event.getProtocol().toString());
+        json.addProperty("type", event.getEventType().name());
+
+        IdentifierCollection identifiers = event.getIdentifierCollection();
+
+        if(identifiers != null)
+        {
+            addIdentifier(json, "from", identifiers.getFromIdentifier());
+            addIdentifier(json, "to", identifiers.getToIdentifier());
+            addAliases(json, identifiers, aliasModel);
+        }
+
+        json.addProperty("text", extractText(event.getDetails()));
+        json.addProperty("timeslot", event.getTimeslot());
+
+        IChannelDescriptor channel = event.getChannelDescriptor();
+
+        if(channel != null && channel.getDownlinkFrequency() > 0)
+        {
+            json.addProperty("frequency", channel.getDownlinkFrequency());
+        }
+
+        return GSON.toJson(json);
     }
 
     /**

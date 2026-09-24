@@ -89,6 +89,12 @@ public class PacketSequence
             return getPacketSequenceHeader().getBlocksToFollow() == count;
         }
 
+        //Unified Data Transport (e.g. ETSI short data / NMEA GPS) sequences specify the appended block count.
+        if(hasUDTHeader())
+        {
+            return mDataBlocks.size() >= getUDTHeader().getAppendedBlockCount();
+        }
+
         return false;
     }
 

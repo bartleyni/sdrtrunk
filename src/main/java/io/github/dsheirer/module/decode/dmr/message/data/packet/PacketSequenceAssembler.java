@@ -108,6 +108,24 @@ public class PacketSequenceAssembler
     }
 
     /**
+     * Dispatches any partially assembled packet sequences that contain data blocks.  Invoked when the transmission
+     * has ended (sync loss) so that sequences are not held until an unrelated later transmission, which is important
+     * for simplex/direct mode channels where there are no repeater idle messages to trigger dispatch.
+     */
+    public void dispatchPendingSequences()
+    {
+        if(mTimeslot1Sequence != null && mTimeslot1Sequence.hasDataBlocks())
+        {
+            dispatchPacketSequence(1);
+        }
+
+        if(mTimeslot2Sequence != null && mTimeslot2Sequence.hasDataBlocks())
+        {
+            dispatchPacketSequence(2);
+        }
+    }
+
+    /**
      * Processes a packet sequence preamble.
      *
      * Note: DMR systems can transmit several preamble messages prior to the actual packet sequence.

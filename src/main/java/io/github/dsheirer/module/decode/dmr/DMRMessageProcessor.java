@@ -71,6 +71,8 @@ public class DMRMessageProcessor implements Listener<IMessage>
     private final FLCAssembler mFLCAssemblerTimeslot2;
     private final MBCAssembler mMBCAssembler;
     private final PacketSequenceAssembler mPacketSequenceAssembler;
+    //Half a second of DMR bits (9600 bps) without sync
+    private static final int SYNC_LOSS_END_OF_TRANSMISSION_BITS = 4800;
     private final SLCAssembler mSLCAssembler = new SLCAssembler();
     private final TalkerAliasAssembler mTalkerAliasAssembler = new TalkerAliasAssembler();
     private Listener<IMessage> mMessageListener;
@@ -120,11 +122,18 @@ public class DMRMessageProcessor implements Listener<IMessage>
             return;
         }
 
-        if(message instanceof SyncLossMessage)
+        if(message instanceof SyncLossMessage syncLoss)
         {
             mSLCAssembler.reset();
             mFLCAssemblerTimeslot1.reset();
             mFLCAssemblerTimeslot2.reset();
+
+            //A sync loss of half a second or more indicates the end of a transmission - dispatch any partially
+            //assembled data packet sequences rather than holding them until the next transmission.
+            if(syncLoss.getBitsProcessed() >= SYNC_LOSS_END_OF_TRANSMISSION_BITS)
+            {
+                mPacketSequenceAssembler.dispatchPendingSequences();
+            }
         }
 
         //Detect and correct messages employing an alternate CRC mask pattern (ie RAS) when ignore CRC is disabled

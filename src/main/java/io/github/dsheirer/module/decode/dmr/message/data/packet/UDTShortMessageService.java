@@ -20,6 +20,7 @@
 package io.github.dsheirer.module.decode.dmr.message.data.packet;
 
 import io.github.dsheirer.bits.CorrectedBinaryMessage;
+import io.github.dsheirer.bits.IntField;
 import io.github.dsheirer.identifier.Identifier;
 import io.github.dsheirer.module.decode.dmr.message.DMRMessage;
 import io.github.dsheirer.module.decode.dmr.message.data.header.UDTHeader;
@@ -37,6 +38,10 @@ public class UDTShortMessageService extends DMRMessage
     private UDTHeader mHeader;
     private String mSMS;
     private UDTNmeaLocation mNmeaLocation;
+    private Boolean mCrcValid;
+    private static final int UDT_BLOCK_LENGTH = 96;
+    private static final int CRC_LENGTH = 16;
+    private static final int CRC_CCITT_POLYNOMIAL = 0x1021;
 
     /**
      * Constructs an instance
@@ -62,6 +67,11 @@ public class UDTShortMessageService extends DMRMessage
         StringBuilder sb = new StringBuilder();
         sb.append("CC:").append(mHeader.getSlotType().getColorCode());
         sb.append(" SMS MESSAGE:").append(getSMS());
+
+        if(!isHeaderValid())
+        {
+            sb.append(" [HEADER CRC ERROR]");
+        }
         sb.append(" FROM:").append(mHeader.getSourceLLID());
         sb.append(" TO:").append(mHeader.getDestinationLLID());
         sb.append(" HEX:").append(getMessage().toHexString());
@@ -87,7 +97,7 @@ public class UDTShortMessageService extends DMRMessage
                     mSMS = parseBCD4Payload();
                     break;
                 case NMEA_GPS_LOCATION_CODED:
-                    mSMS = getNmeaLocation().toString();
+                    mSMS = isCrcValid() ? getNmeaLocation().toString() : "NMEA LOCATION (CRC ERROR)";
                     break;
                 case BINARY:
                 case MOBILE_SUBSCRIBER_OR_TALKGROUP_ADDRESS:
@@ -110,6 +120,57 @@ public class UDTShortMessageService extends DMRMessage
         }
 
         return mSMS;
+    }
+
+    /**
+     * Indicates if the UDT payload passes its CRC check.  The final 16 bits of the last appended block carry a
+     * CRC-CCITT (initial value 0, no mask) calculated over all preceding payload bits.  The payload CRC is always
+     * checked, independent of the channel's Ignore CRC setting, because a failed check means corrupted content.
+     */
+    public boolean isCrcValid()
+    {
+        if(mCrcValid == null)
+        {
+            mCrcValid = checkCrc();
+        }
+
+        return mCrcValid;
+    }
+
+    private boolean checkCrc()
+    {
+        CorrectedBinaryMessage payload = getMessage();
+        int length = mHeader.getAppendedBlockCount() * UDT_BLOCK_LENGTH;
+
+        if(payload == null || payload.size() < length)
+        {
+            return false;
+        }
+
+        int dataLength = length - CRC_LENGTH;
+        int crc = 0;
+
+        for(int i = 0; i < dataLength; i++)
+        {
+            boolean feedback = payload.get(i) ^ ((crc & 0x8000) != 0);
+            crc = (crc << 1) & 0xFFFF;
+
+            if(feedback)
+            {
+                crc ^= CRC_CCITT_POLYNOMIAL;
+            }
+        }
+
+        return crc == payload.getInt(IntField.range(dataLength, length - 1));
+    }
+
+    /**
+     * Indicates if the UDT header passed its own CRC check.  When false, the source and destination IDs may be wrong
+     * even though the payload CRC is valid.
+     */
+    public boolean isHeaderValid()
+    {
+        return mHeader.isValid();
     }
 
     /**

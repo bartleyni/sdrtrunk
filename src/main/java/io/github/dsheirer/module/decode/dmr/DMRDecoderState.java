@@ -408,7 +408,7 @@ public class DMRDecoderState extends TimeslotDecoderState
         broadcast(new DecoderStateEvent(this, Event.START, State.DATA, getTimeslot()));
 
         //ETSI UDT NMEA coded GPS position (e.g. DMR APRS position reports) - plot on the map when valid
-        if(sms.isNmeaLocation() && sms.getNmeaLocation().isValid())
+        if(sms.isNmeaLocation() && sms.isCrcValid() && sms.getNmeaLocation().isValid())
         {
             UDTNmeaLocation location = sms.getNmeaLocation();
             MutableIdentifierCollection mic = new MutableIdentifierCollection(sms.getIdentifiers());
@@ -418,7 +418,7 @@ public class DMRDecoderState extends TimeslotDecoderState
             PlottableDecodeEvent.PlottableDecodeEventBuilder builder = PlottableDecodeEvent
                     .plottableBuilder(DecodeEventType.GPS, sms.getTimestamp())
                     .channel(getCurrentChannel())
-                    .details(location.toString())
+                    .details(location.toString() + (sms.isHeaderValid() ? "" : " [HEADER CRC ERROR - IDS UNVERIFIED]"))
                     .identifiers(mic)
                     .protocol(Protocol.DMR)
                     .location(location.getPosition())
@@ -435,7 +435,10 @@ public class DMRDecoderState extends TimeslotDecoderState
             return;
         }
 
-        DecodeEvent smsEvent = DMRDecodeEvent.builder(DecodeEventType.SMS, sms.getTimestamp())
+        //NMEA location reports that failed validation are still GPS events (not text messages)
+        DecodeEventType type = sms.isNmeaLocation() ? DecodeEventType.GPS : DecodeEventType.SMS;
+
+        DecodeEvent smsEvent = DMRDecodeEvent.builder(type, sms.getTimestamp())
                 .channel(getCurrentChannel())
                 .details("MESSAGE: " + sms.getSMS())
                 .identifiers(new IdentifierCollection(sms.getIdentifiers()))
