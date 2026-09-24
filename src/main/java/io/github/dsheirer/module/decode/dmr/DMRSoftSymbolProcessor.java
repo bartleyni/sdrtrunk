@@ -76,6 +76,18 @@ public class DMRSoftSymbolProcessor
     //~100 ppm and direct mode syncs are 288 symbols apart, so a wider search and symbol period tracking are required.
     private static final int HANDHELD_FINE_SEARCH_STEPS = 10;
     private static final double HANDHELD_SYMBOL_PERIOD_LOOP_GAIN = 0.5;
+    //Handheld radios (e.g. Ailunce HD2) can space bursts a symbol or two closer than the nominal 144/288 symbols.  At
+    //the expected sync position, the sync correlation is also evaluated (in half symbol steps) up to this many symbols
+    //earlier.  Tuned against on-air HD2 baseband recordings.
+    private static final int HANDHELD_EARLY_SYNC_SYMBOLS = 3;
+    private static final float COARSE_SYNC_THRESHOLD = 95;
+    private static final DMRSyncPattern[] MOBILE_SYNC_FAMILY = {DMRSyncPattern.MOBILE_STATION_DATA,
+            DMRSyncPattern.MOBILE_STATION_VOICE};
+    private static final DMRSyncPattern[] DIRECT_SYNC_FAMILY = {DMRSyncPattern.DIRECT_DATA_TIMESLOT_1,
+            DMRSyncPattern.DIRECT_VOICE_TIMESLOT_1, DMRSyncPattern.DIRECT_DATA_TIMESLOT_2,
+            DMRSyncPattern.DIRECT_VOICE_TIMESLOT_2};
+    private static final DMRSyncPattern[] BASE_SYNC_FAMILY = {DMRSyncPattern.BASE_STATION_DATA,
+            DMRSyncPattern.BASE_STATION_VOICE};
     //Sync gap (5 seconds) after which an automatically established sync mode lock is released so that the channel can
     //adapt when the operating mode changes (e.g. repeater frequency also used for direct mode talkaround).
     private static final int SYNC_MODE_RELEASE_SYMBOLS = 24000;
@@ -118,6 +130,7 @@ public class DMRSoftSymbolProcessor
     private int mSymbolsSinceLastSync = 0;
     private int mSymbolsSinceTimingUpdate = 0;
     private double mLastCoarseAdjustment = 0;
+    private DMRSyncPattern mLastSyncPattern = DMRSyncPattern.UNKNOWN;
     private SyncResultsViewer mSyncResultsViewer;
     private FeedbackDecoder mFeedbackDecoder;
 
@@ -294,6 +307,10 @@ public class DMRSoftSymbolProcessor
                             {
                                 mSymbolsSinceLastSync -= 144;
                             }
+                            else if(isHandheldTransmission(mLastSyncPattern) && detectEarlySync())
+                            {
+                                //Sync detected up to a few symbols before the expected position and accepted
+                            }
                             else
                             {
                                 primaryScore = mSyncDetector.calculate();
@@ -307,10 +324,7 @@ public class DMRSoftSymbolProcessor
                                 if(primaryScore > SYNC_DETECTION_THRESHOLD && optimizeFine(mSyncDetector.getDetectedPattern()))
                                 {
                                     //Update the sync mode monitor and message framer
-                                    mSyncModeMonitor.detected(mSyncDetector.getDetectedPattern());
-                                    mMessageFramer.syncDetected(mSyncDetector.getDetectedPattern());
-                                    mSymbolsSinceLastSync = 0;
-                                    mSymbolsSinceTimingUpdate = 0;
+                                    acceptSync(mSyncDetector.getDetectedPattern());
                                 }
                                 //Mobile/direct mode transmissions have an empty alternate timeslot, so there are 288
                                 //symbols between syncs (vs 144 on a repeater) and the symbol timing drifts further
@@ -322,10 +336,7 @@ public class DMRSoftSymbolProcessor
                                         optimizeCoarse(mSyncDetector.getDetectedPattern(), 0))
                                 {
                                     updateSymbolPeriod(mLastCoarseAdjustment);
-                                    mSyncModeMonitor.detected(mSyncDetector.getDetectedPattern());
-                                    mMessageFramer.syncDetected(mSyncDetector.getDetectedPattern());
-                                    mSymbolsSinceLastSync = 0;
-                                    mSymbolsSinceTimingUpdate = 0;
+                                    acceptSync(mSyncDetector.getDetectedPattern());
                                 }
                                 else if(emptyTimeslot)
                                 {
@@ -359,6 +370,7 @@ public class DMRSoftSymbolProcessor
                             mFineSync = true;
                             mSymbolsSinceLastSync = 0;
                             mSymbolsSinceTimingUpdate = 0;
+                            mLastSyncPattern = mSyncDetector.getDetectedPattern();
                         }
                         else if(secondaryScore > SYNC_DETECTION_THRESHOLD && optimizeCoarse(mSyncDetectorSecondary.getDetectedPattern(), -mSecondarySyncOffset))
                         {
@@ -367,6 +379,7 @@ public class DMRSoftSymbolProcessor
                             mFineSync = true;
                             mSymbolsSinceLastSync = 0;
                             mSymbolsSinceTimingUpdate = 0;
+                            mLastSyncPattern = mSyncDetectorSecondary.getDetectedPattern();
                         }
                     }
 
@@ -397,6 +410,90 @@ public class DMRSoftSymbolProcessor
         }
 
         return standardDeviation.getResult() > mNoiseStandardDeviationThreshold;
+    }
+
+    /**
+     * Accepts a sync detected while in fine sync: updates the sync mode monitor and message framer and resets the
+     * sync counters.
+     * @param pattern that was detected
+     */
+    private void acceptSync(DMRSyncPattern pattern)
+    {
+        mSyncModeMonitor.detected(pattern);
+        mMessageFramer.syncDetected(pattern);
+        mSymbolsSinceLastSync = 0;
+        mSymbolsSinceTimingUpdate = 0;
+        mLastSyncPattern = pattern;
+    }
+
+    /**
+     * Sync patterns from the same family (mobile station, direct mode, or base station) as the argument pattern.
+     */
+    private static DMRSyncPattern[] getSyncFamily(DMRSyncPattern pattern)
+    {
+        if(pattern.isMobileStationSyncPattern())
+        {
+            return MOBILE_SYNC_FAMILY;
+        }
+        else if(pattern.isDirect())
+        {
+            return DIRECT_SYNC_FAMILY;
+        }
+
+        return BASE_SYNC_FAMILY;
+    }
+
+    /**
+     * Handheld transmissions: evaluates the sync correlation at the expected sync position and at up to
+     * HANDHELD_EARLY_SYNC_SYMBOLS symbols earlier, for each sync pattern in the family of the previous sync.  When the
+     * best correlation occurs before the expected position, the sync is re-optimized at that position via the coarse
+     * optimization, which also re-aligns the symbol delay line so that the message framer receives the burst from its
+     * true start.  Selecting the best score across the window (rather than the first position that exceeds a
+     * threshold) avoids locking onto sync correlation side lobes.
+     * @return true if an early sync was detected and accepted.
+     */
+    private boolean detectEarlySync()
+    {
+        double offset = mBufferPointer + mSamplePoint;
+        DMRSyncPattern[] family = getSyncFamily(mLastSyncPattern);
+        float expectedScore = 0;
+
+        for(DMRSyncPattern pattern: family)
+        {
+            expectedScore = Math.max(expectedScore, score(offset, mObservedSamplesPerSymbol, pattern));
+        }
+
+        float bestScore = expectedScore;
+        double bestSymbols = 0;
+        DMRSyncPattern bestPattern = null;
+
+        //Half symbol steps so that the coarse optimization (+/- 1/4 symbol) always spans the true sync position
+        for(int halfSymbols = 1; halfSymbols <= HANDHELD_EARLY_SYNC_SYMBOLS * 2; halfSymbols++)
+        {
+            double symbols = halfSymbols / 2.0;
+            double candidate = offset - (symbols * mObservedSamplesPerSymbol);
+
+            for(DMRSyncPattern pattern: family)
+            {
+                float candidateScore = score(candidate, mObservedSamplesPerSymbol, pattern);
+
+                if(candidateScore > bestScore)
+                {
+                    bestScore = candidateScore;
+                    bestSymbols = symbols;
+                    bestPattern = pattern;
+                }
+            }
+        }
+
+        if(bestPattern != null && bestScore >= COARSE_SYNC_THRESHOLD &&
+                optimizeCoarse(bestPattern, -bestSymbols * mObservedSamplesPerSymbol))
+        {
+            acceptSync(bestPattern);
+            return true;
+        }
+
+        return false;
     }
 
     /**
