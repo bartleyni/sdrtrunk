@@ -155,6 +155,37 @@ public class DMRPacketCrcTest
     }
 
     @Test
+    void ipWrappedTextMessageProducesTextMessageEvent()
+    {
+        DMRMessageProcessor processor = new DMRMessageProcessor(new DecodeConfigDMR(), new DMRCrcMaskManager(false));
+        List<IMessage> messages = new ArrayList<>();
+        processor.setMessageListener(messages::add);
+        processor.receive(header());
+
+        for(int x = 0; x < TEST_BLOCKS.length; x++)
+        {
+            processor.receive(block(TEST_BLOCKS[x], 1060 + x * 60));
+        }
+
+        DMRPacketMessage packet = messages.stream().filter(m -> m instanceof DMRPacketMessage)
+                .map(m -> (DMRPacketMessage)m).findFirst().orElse(null);
+        assertNotNull(packet);
+
+        io.github.dsheirer.controller.channel.Channel channel = new io.github.dsheirer.controller.channel.Channel("test");
+        channel.setDecodeConfiguration(new DecodeConfigDMR());
+        DMRDecoderState state = new DMRDecoderState(channel, 1, null);
+        List<io.github.dsheirer.module.decode.event.IDecodeEvent> events = new ArrayList<>();
+        state.addDecodeEventListener(events::add);
+        state.receive(packet);
+
+        io.github.dsheirer.module.decode.event.IDecodeEvent text = events.stream()
+                .filter(e -> e.getEventType() == io.github.dsheirer.module.decode.event.DecodeEventType.TEXT_MESSAGE)
+                .findFirst().orElse(null);
+        assertNotNull(text, "IP wrapped TMS text should produce a TEXT_MESSAGE event (published to MQTT)");
+        assertTrue(text.getDetails().contains("test"));
+    }
+
+    @Test
     void packetWithMissingBlockIsInvalid()
     {
         DMRMessageProcessor processor = new DMRMessageProcessor(new DecodeConfigDMR(), new DMRCrcMaskManager(false));

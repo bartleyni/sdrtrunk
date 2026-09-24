@@ -105,6 +105,7 @@ import io.github.dsheirer.module.decode.ip.hytera.sds.HyteraUnknownPacket;
 import io.github.dsheirer.module.decode.ip.hytera.shortdata.HyteraShortDataPacket;
 import io.github.dsheirer.module.decode.ip.hytera.sms.HyteraSmsPacket;
 import io.github.dsheirer.module.decode.ip.mototrbo.ars.ARSPacket;
+import io.github.dsheirer.module.decode.ip.IPacket;
 import io.github.dsheirer.module.decode.ip.mototrbo.lrrp.LRRPPacket;
 import io.github.dsheirer.module.decode.ip.mototrbo.lrrp.token.Heading;
 import io.github.dsheirer.module.decode.ip.mototrbo.lrrp.token.Point2d;
@@ -451,9 +452,30 @@ public class DMRDecoderState extends TimeslotDecoderState
     /**
      * Processes a packet message
      */
+    /**
+     * Finds the innermost (application layer) packet, unwrapping any IP and UDP packet layers.
+     * @param packet to unwrap
+     * @return innermost packet, or the argument when there are no nested payloads
+     */
+    private static IPacket getApplicationPacket(IPacket packet)
+    {
+        IPacket current = packet;
+
+        while(current != null && current.getPayload() != null)
+        {
+            current = current.getPayload();
+        }
+
+        return current;
+    }
+
     private void processPacket(DMRPacketMessage packet)
     {
         broadcast(new DecoderStateEvent(this, Event.START, State.DATA, getTimeslot()));
+
+        //Motorola application packets (TMS text, LRRP location, ARS, XCMP) can be carried directly (MNIS) or inside an
+        //IP/UDP packet (e.g. Ailunce HD2 text messages) - use the innermost application packet for event processing.
+        IPacket applicationPacket = getApplicationPacket(packet.getPacket());
 
         //Hytera SDS Long SMS message
         if(packet.getPacket() instanceof HyteraSmsPacket hyteraSmsPacket)
@@ -528,7 +550,7 @@ public class DMRDecoderState extends TimeslotDecoderState
             broadcast(unknownTokenEvent);
         }
         //Motorola ARS
-        else if(packet.getPacket() instanceof ARSPacket ars)
+        else if(applicationPacket instanceof ARSPacket ars)
         {
             MutableIdentifierCollection mic = new MutableIdentifierCollection(packet.getIdentifiers());
 
@@ -541,7 +563,7 @@ public class DMRDecoderState extends TimeslotDecoderState
             broadcast(shortDataEvent);
         }
         //Motorola LRRP
-        else if(packet.getPacket() instanceof LRRPPacket lrrp)
+        else if(applicationPacket instanceof LRRPPacket lrrp)
         {
             MutableIdentifierCollection mic = new MutableIdentifierCollection(packet.getIdentifiers());
             addAliasListConfiguration(mic);
@@ -602,7 +624,7 @@ public class DMRDecoderState extends TimeslotDecoderState
             }
         }
         //Motorola TMS
-        else if(packet.getPacket() instanceof TMSPacket tms)
+        else if(applicationPacket instanceof TMSPacket tms)
         {
             MutableIdentifierCollection mic = new MutableIdentifierCollection(packet.getIdentifiers());
 
@@ -615,7 +637,7 @@ public class DMRDecoderState extends TimeslotDecoderState
             broadcast(shortDataEvent);
         }
         //Motorola XCMP
-        else if(packet.getPacket() instanceof XCMPPacket xcmp)
+        else if(applicationPacket instanceof XCMPPacket xcmp)
         {
             MutableIdentifierCollection mic = new MutableIdentifierCollection(packet.getIdentifiers());
 
