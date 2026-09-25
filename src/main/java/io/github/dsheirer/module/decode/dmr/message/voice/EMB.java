@@ -110,6 +110,16 @@ public class EMB
     }
 
     /**
+     * Valid 16-bit EMB codeword for the 7 information bits (color code (4), PI (1), LCSS (2)).
+     * @param information bits value 0-127
+     * @return codeword
+     */
+    public static int getCodeword(int information)
+    {
+        return VALID_WORDS[information & 0x7F];
+    }
+
+    /**
      * Indicates if this message is valid and has passed CRC check
      */
     public boolean isValid()

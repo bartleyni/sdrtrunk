@@ -70,8 +70,9 @@ public class DMRBasebandReplayTest
                     gpsReports[0]++;
                 }
 
-                out.printf("%8.3f %s %s%n", framesRead[0] / sampleRate[0], message.isValid() ? "OK " : "BAD",
-                        message.toString());
+                out.printf("%8.3f %s %s%s%n", framesRead[0] / sampleRate[0], message.isValid() ? "OK " : "BAD",
+                        message.toString(), message instanceof io.github.dsheirer.module.decode.dmr.message.voice.VoiceEMBMessage v ?
+                                " EMB=" + (v.getEMB().isValid() ? "OK" : "BAD") : "");
             });
 
             source.setListener(buffer -> {

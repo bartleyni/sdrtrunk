@@ -29,6 +29,7 @@ import io.github.dsheirer.module.decode.dmr.sync.DMRSoftSyncDetector;
 import io.github.dsheirer.module.decode.dmr.sync.DMRSoftSyncDetectorFactory;
 import io.github.dsheirer.module.decode.dmr.sync.DMRSyncDetectMode;
 import io.github.dsheirer.module.decode.dmr.sync.DMRSyncModeMonitor;
+import io.github.dsheirer.module.decode.dmr.message.voice.EMB;
 import io.github.dsheirer.module.decode.dmr.sync.DMRSyncPattern;
 import io.github.dsheirer.sample.Listener;
 import java.nio.ByteBuffer;
@@ -81,6 +82,13 @@ public class DMRSoftSymbolProcessor
     //earlier.  Tuned against on-air HD2 baseband recordings.
     private static final int HANDHELD_EARLY_SYNC_SYMBOLS = 3;
     private static final float COARSE_SYNC_THRESHOLD = 95;
+    //Voice frames B-F have no sync pattern.  For handheld transmissions the known EMB field (8 dibits at the start and
+    //end of the center field) is used to re-align each burst when the radio's burst spacing is short.
+    private static final double EMB_SEARCH_MAXIMUM_SYMBOLS = 2.5;
+    private static final double EMB_SEARCH_STEP_SYMBOLS = 0.25;
+    private static final float EMB_MINIMUM_NORMALIZED_SCORE = 0.7f;
+    private static final float EMB_MINIMUM_IMPROVEMENT = 0.15f;
+    private static final int[] EMB_CENTER_POSITIONS = {0, 1, 2, 3, 20, 21, 22, 23};
     private static final DMRSyncPattern[] MOBILE_SYNC_FAMILY = {DMRSyncPattern.MOBILE_STATION_DATA,
             DMRSyncPattern.MOBILE_STATION_VOICE};
     private static final DMRSyncPattern[] DIRECT_SYNC_FAMILY = {DMRSyncPattern.DIRECT_DATA_TIMESLOT_1,
@@ -305,6 +313,13 @@ public class DMRSoftSymbolProcessor
 
                             if(mMessageFramer.isVoiceSuperFrame() && !emptyTimeslot)
                             {
+                                //Voice frames B-F: re-align handheld bursts using the EMB field
+                                if(isHandheldTransmission(mLastSyncPattern) &&
+                                        mMessageFramer.isAssemblingVoiceFrameWithoutSync())
+                                {
+                                    alignVoiceFrame();
+                                }
+
                                 mSymbolsSinceLastSync -= 144;
                             }
                             else if(isHandheldTransmission(mLastSyncPattern) && detectEarlySync())
@@ -424,6 +439,144 @@ public class DMRSoftSymbolProcessor
         mSymbolsSinceLastSync = 0;
         mSymbolsSinceTimingUpdate = 0;
         mLastSyncPattern = pattern;
+    }
+
+    /**
+     * Ideal symbol phases for the 8 EMB dibits of the specified 16-bit EMB codeword.
+     */
+    private static float[] getEMBSymbols(int codeword)
+    {
+        float[] symbols = new float[8];
+
+        for(int x = 0; x < 8; x++)
+        {
+            boolean bit1 = ((codeword >> (15 - (x * 2))) & 1) == 1;
+            boolean bit2 = ((codeword >> (14 - (x * 2))) & 1) == 1;
+            symbols[x] = (bit1 ? (bit2 ? Dibit.D11_MINUS_3 : Dibit.D10_MINUS_1) :
+                    (bit2 ? Dibit.D01_PLUS_3 : Dibit.D00_PLUS_1)).getIdealPhase();
+        }
+
+        return symbols;
+    }
+
+    /**
+     * Normalized correlation of the EMB dibits of a voice burst center field ending at the offset.
+     * @param offset sample position of the final symbol of the (24 symbol) center field
+     * @param embSymbols ideal EMB symbol phases
+     * @return correlation normalized to 1.0 for a perfect match
+     */
+    private float scoreEMB(double offset, float[] embSymbols)
+    {
+        float score = 0;
+        float perfect = 0;
+        int maxPointer = mBuffer.length - 1;
+
+        for(int x = 0; x < 8; x++)
+        {
+            double pointer = offset - (mObservedSamplesPerSymbol * (23 - EMB_CENTER_POSITIONS[x]));
+            int integral = (int)Math.floor(pointer);
+
+            if(integral >= 0 && integral < maxPointer)
+            {
+                score += LinearInterpolator.calculate(mBuffer[integral], mBuffer[integral + 1], pointer - integral) *
+                        embSymbols[x];
+            }
+
+            perfect += embSymbols[x] * embSymbols[x];
+        }
+
+        return score / perfect;
+    }
+
+    /**
+     * Handheld voice frames B-F (no sync pattern): evaluates the EMB field correlation at the expected position and up
+     * to EMB_SEARCH_MAXIMUM_SYMBOLS earlier, for each EMB codeword of the channel color code.  When the EMB clearly
+     * correlates better at an earlier position, the symbol timing is re-aligned there and the burst is re-delivered to
+     * the message framer from its true start, so that the voice frame is decoded from correctly aligned symbols.
+     */
+    private void alignVoiceFrame()
+    {
+        int colorCode = mMessageFramer.getColorCode();
+
+        if(colorCode < 0)
+        {
+            return;
+        }
+
+        double offset = mBufferPointer + mSamplePoint;
+        float expectedScore = -Float.MAX_VALUE;
+        float bestScore = -Float.MAX_VALUE;
+        double bestSymbols = 0;
+
+        for(int info = 0; info < 8; info++)
+        {
+            float[] embSymbols = getEMBSymbols(EMB.getCodeword((colorCode << 3) | info));
+
+            for(double symbols = 0; symbols <= EMB_SEARCH_MAXIMUM_SYMBOLS; symbols += EMB_SEARCH_STEP_SYMBOLS)
+            {
+                float candidate = scoreEMB(offset - (symbols * mObservedSamplesPerSymbol), embSymbols);
+
+                if(symbols == 0)
+                {
+                    expectedScore = Math.max(expectedScore, candidate);
+                }
+
+                if(candidate > bestScore)
+                {
+                    bestScore = candidate;
+                    bestSymbols = symbols;
+                }
+            }
+        }
+
+        if(bestSymbols > 0 && bestScore >= EMB_MINIMUM_NORMALIZED_SCORE &&
+                bestScore >= expectedScore + EMB_MINIMUM_IMPROVEMENT)
+        {
+            realignBurst(-bestSymbols * mObservedSamplesPerSymbol);
+        }
+    }
+
+    /**
+     * Moves the symbol timing by the adjustment and re-delivers the current burst (from CACH through the center field)
+     * to the message framer, resampled at the new timing.
+     * @param adjustment in samples (negative to move earlier)
+     */
+    private void realignBurst(double adjustment)
+    {
+        mSamplePoint += adjustment;
+
+        while(mSamplePoint < 0)
+        {
+            mSamplePoint++;
+            mBufferPointer--;
+        }
+
+        while(mSamplePoint > 1)
+        {
+            mSamplePoint--;
+            mBufferPointer++;
+        }
+
+        double resamplePointer = mBufferPointer + mSamplePoint - (89 * mObservedSamplesPerSymbol);
+
+        for(int x = 0; x < 90; x++)
+        {
+            int integral = (int)Math.floor(resamplePointer);
+
+            if(integral >= 0)
+            {
+                mDibitDelayLine.insert(toSymbol(LinearInterpolator.calculate(mBuffer[integral], mBuffer[integral + 1],
+                        resamplePointer - integral)));
+            }
+            else
+            {
+                mDibitDelayLine.insert(Dibit.D01_PLUS_3);
+            }
+
+            resamplePointer += mObservedSamplesPerSymbol;
+        }
+
+        mMessageFramer.restartActiveBurst();
     }
 
     /**

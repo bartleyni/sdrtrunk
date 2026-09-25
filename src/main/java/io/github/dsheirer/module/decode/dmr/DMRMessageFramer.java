@@ -26,6 +26,8 @@ import io.github.dsheirer.message.SyncLossMessage;
 import io.github.dsheirer.module.decode.dmr.message.CACH;
 import io.github.dsheirer.module.decode.dmr.message.DMRMessage;
 import io.github.dsheirer.module.decode.dmr.message.DMRMessageFactory;
+import io.github.dsheirer.module.decode.dmr.message.data.DataMessage;
+import io.github.dsheirer.module.decode.dmr.message.voice.VoiceEMBMessage;
 import io.github.dsheirer.module.decode.dmr.sync.DMRSyncPattern;
 import io.github.dsheirer.protocol.Protocol;
 import io.github.dsheirer.sample.Listener;
@@ -59,6 +61,7 @@ public class DMRMessageFramer implements Listener<Dibit>
     private long mReferenceTimestamp = 0;
     private boolean mRunning = false;
     private boolean mSimplexMode = false;
+    private int mColorCode = -1;
     private final DMRMessageFactory mMessageFactory;
 
     /**
@@ -122,6 +125,63 @@ public class DMRMessageFramer implements Listener<Dibit>
     public void setSimplexMode(boolean enabled)
     {
         mSimplexMode = enabled;
+    }
+
+    /**
+     * Tracks the channel color code from bursts with a valid slot type or EMB.
+     */
+    private void updateColorCode(IMessage message)
+    {
+        if(message instanceof VoiceEMBMessage voice && voice.getEMB().isValid())
+        {
+            mColorCode = voice.getEMB().getColorCode();
+        }
+        else if(message instanceof DataMessage data && data.isValid())
+        {
+            mColorCode = data.getSlotType().getColorCode();
+        }
+    }
+
+    /**
+     * Most recently observed channel color code, or -1 when unknown.
+     */
+    public int getColorCode()
+    {
+        return mColorCode;
+    }
+
+    /**
+     * Indicates if the framer is assembling a voice frame B-F burst (a voice burst without a sync pattern).
+     */
+    public boolean isAssemblingVoiceFrameWithoutSync()
+    {
+        if(!mAssemblingBurst)
+        {
+            return false;
+        }
+
+        DMRSyncPattern pattern = mBufferAActive ? mBufferAPattern : mBufferBPattern;
+        return pattern.isVoicePattern() && pattern != DMRSyncPattern.DIRECT_EMPTY_TIMESLOT &&
+                !DMRSyncPattern.SYNC_PATTERNS.contains(pattern);
+    }
+
+    /**
+     * Restarts assembly of the burst currently being assembled from its first dibit.  Used when the symbol processor
+     * re-aligns a burst and re-delivers it from its true start.
+     */
+    public void restartActiveBurst()
+    {
+        if(mAssemblingBurst)
+        {
+            if(mBufferAActive)
+            {
+                mBufferAPointer = 0;
+            }
+            else
+            {
+                mBufferBPointer = 0;
+            }
+        }
     }
 
     /**
@@ -195,7 +255,9 @@ public class DMRMessageFramer implements Listener<Dibit>
             mBufferBTimeslot = 2;
         }
 
-        dispatch(mMessageFactory.create(mBufferAPattern, message, cach, getTimestamp(), mBufferATimeslot));
+        IMessage messageA = mMessageFactory.create(mBufferAPattern, message, cach, getTimestamp(), mBufferATimeslot);
+        updateColorCode(messageA);
+        dispatch(messageA);
 
         //Since voice frames only have sync on the first burst, we use pseudo-patterns to track the rest of the bursts
         //across the voice super-frame.  If the current pattern is a voice frame, set it to the next pseudo voice sync.
@@ -269,7 +331,9 @@ public class DMRMessageFramer implements Listener<Dibit>
             mBufferATimeslot = 2;
         }
 
-        dispatch(mMessageFactory.create(mBufferBPattern, burst, cach, getTimestamp(), mBufferBTimeslot));
+        IMessage messageB = mMessageFactory.create(mBufferBPattern, burst, cach, getTimestamp(), mBufferBTimeslot);
+        updateColorCode(messageB);
+        dispatch(messageB);
 
         //Since voice frames only have sync on the first burst, we use pseudo-patterns to track the rest of the bursts
         //across the voice super-frame.  If the current pattern is a voice frame, set it to the next pseudo voice sync.
